@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# omarchy-remote — browser remote desktop for Omarchy.
+#
+# Pipeline:  browser -> (Tailscale | Pangolin) -> noVNC :6080 -> wayvnc :5900 -> Hyprland
+# Both local services listen on 127.0.0.1 only; nothing is exposed until you
+# publish it with `omarchy-remote tailscale on` or `omarchy-remote pangolin connect`.
+#
+# Run as your normal desktop user (not root). sudo is used only where needed.
+
+set -euo pipefail
+
+VERSION="0.1.0"
+
+# ---- settings (override in ~/.config/omarchy-remote/config) -----------------
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-remote"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+VNC_PORT=5900
+WEB_PORT=6080
+NOVNC_REPO="https://github.com/novnc/noVNC"
+NOVNC_REF="master"
+WEBSOCKIFY_REPO="https://github.com/novnc/websockify"
+WEBSOCKIFY_REF="master"
+PANGOLIN_ENDPOINT="https://app.pangolin.net"
+NOVNC_QUALITY=6        # 0-9, lower = smaller/faster
+NOVNC_COMPRESSION=2    # 0-9, higher = more CPU, less bandwidth
+# shellcheck source=/dev/null
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+NOVNC_DIR="$DATA_DIR/novnc"
+VNC_UNIT="omarchy-remote-vnc.service"
+WEB_UNIT="omarchy-remote-web.service"
+
+# ---- helpers ----------------------------------------------------------------
+c_ok=$'\e[32m'; c_warn=$'\e[33m'; c_err=$'\e[31m'; c_dim=$'\e[2m'; c_off=$'\e[0m'
+[[ -t 1 ]] || { c_ok=""; c_warn=""; c_err=""; c_dim=""; c_off=""; }
+info() { printf '%s==>%s %s\n' "$c_ok" "$c_off" "$*"; }
+warn() { printf '%s!!%s  %s\n' "$c_warn" "$c_off" "$*" >&2; }
+die()  { printf '%sxx%s  %s\n' "$c_err" "$c_off" "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+require_user() {
+  [[ $EUID -ne 0 ]] || die "Run as your desktop user, not root (sudo is used where needed)."
+}
+
+hypr_env() {
+  # Locate the running Hyprland instance (works from systemd --user and SSH).
+  export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [[ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" && -d "$XDG_RUNTIME_DIR/hypr" ]]; then
+    # Instance dirs are plain hex/timestamp names; newest = current session.
+    # shellcheck disable=SC2012
+    HYPRLAND_INSTANCE_SIGNATURE="$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)"
+    export HYPRLAND_INSTANCE_SIGNATURE
+  fi
+  [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]
+}
+
+ts_url() {
+  have tailscale || return 1
+  tailscale status --json 2>/dev/null \
+    | python3 -c 'import sys,json; print("https://"+json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null
+}
+
+# ---- commands ---------------------------------------------------------------
+cmd_setup() {
+  require_user
+  have pacman || die "This tool targets Omarchy / Arch Linux (pacman not found)."
+  have hyprctl || warn "hyprctl not found — is this an Omarchy (Hyprland) machine?"
+
+  info "Installing packages (wayvnc, git, python)…"
+  sudo pacman -S --needed --noconfirm wayvnc git python
+
+  info "Installing noVNC into $NOVNC_DIR"
+  mkdir -p "$DATA_DIR"
+  if [[ ! -d "$NOVNC_DIR/.git" ]]; then
+    git clone -q --depth 1 --branch "$NOVNC_REF" "$NOVNC_REPO" "$NOVNC_DIR"
+  fi
+  if [[ ! -d "$NOVNC_DIR/utils/websockify/.git" ]]; then
+    git clone -q --depth 1 --branch "$WEBSOCKIFY_REF" "$WEBSOCKIFY_REPO" "$NOVNC_DIR/utils/websockify"
+  fi
+  write_novnc_defaults
+  ln -sf vnc.html "$NOVNC_DIR/index.html"   # so https://host/ opens the desktop
+
+  migrate_legacy_units
+  write_units
+
+  info "Starting services…"
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$VNC_UNIT" "$WEB_UNIT"
+  sleep 2
+  cmd_status
+  cat <<EOF
+
+Next step — publish it:
+  omarchy-remote tailscale on        # private: only your tailnet devices
+  omarchy-remote pangolin connect    # public URL with login (share with others)
+EOF
+}
+
+write_novnc_defaults() {
+  cat > "$NOVNC_DIR/defaults.json" <<EOF
+{"autoconnect": true, "resize": "scale", "reconnect": true, "quality": $NOVNC_QUALITY, "compression": $NOVNC_COMPRESSION}
+EOF
+}
+
+write_units() {
+  mkdir -p "$UNIT_DIR"
+  local self; self="$(readlink -f "$0")"
+  cat > "$UNIT_DIR/$VNC_UNIT" <<EOF
+[Unit]
+Description=omarchy-remote: wayvnc (Hyprland desktop on 127.0.0.1:$VNC_PORT)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStartPre=$self ensure-display
+ExecStart=/usr/bin/wayvnc 127.0.0.1 $VNC_PORT
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+  cat > "$UNIT_DIR/$WEB_UNIT" <<EOF
+[Unit]
+Description=omarchy-remote: noVNC web client (127.0.0.1:$WEB_PORT)
+After=$VNC_UNIT
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=$NOVNC_DIR/utils/novnc_proxy --vnc 127.0.0.1:$VNC_PORT --listen 127.0.0.1:$WEB_PORT
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+EOF
+}
+
+migrate_legacy_units() {
+  # Earlier manual setups used plain wayvnc.service / novnc.service on the same ports.
+  local u
+  for u in wayvnc.service novnc.service; do
+    if [[ -f "$UNIT_DIR/$u" ]] && grep -qE '127\.0\.0\.1[: ](5900|6080)' "$UNIT_DIR/$u"; then
+      warn "Replacing legacy $u with omarchy-remote units"
+      systemctl --user disable --now "$u" 2>/dev/null || true
+      mv "$UNIT_DIR/$u" "$UNIT_DIR/$u.bak"
+    fi
+  done
+}
+
+cmd_ensure_display() {
+  # Called before wayvnc starts: if no monitor is attached, create a virtual one.
+  hypr_env || { echo "Hyprland not running yet"; exit 1; }
+  if ! hyprctl monitors 2>/dev/null | grep -q '^Monitor'; then
+    echo "No monitor attached — creating a headless output"
+    hyprctl output create headless >/dev/null
+  fi
+}
+
+cmd_status() {
+  local u state
+  echo "omarchy-remote $VERSION"
+  for u in "$VNC_UNIT" "$WEB_UNIT"; do
+    state="$(systemctl --user is-active "$u" 2>/dev/null || true)"
+    if [[ "$state" == active ]]; then
+      printf '  %-28s %sactive%s\n' "$u" "$c_ok" "$c_off"
+    else
+      printf '  %-28s %s%s%s\n' "$u" "$c_err" "${state:-not installed}" "$c_off"
+    fi
+  done
+  if have tailscale && tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$WEB_PORT"; then
+    printf '  %-28s %s%s%s\n' "tailscale serve" "$c_ok" "$(ts_url || echo on)" "$c_off"
+  else
+    printf '  %-28s %soff%s\n' "tailscale serve" "$c_dim" "$c_off"
+  fi
+  if systemctl is-active --quiet pangolin-site 2>/dev/null; then
+    printf '  %-28s %sconnected (URL: see Pangolin dashboard)%s\n' "pangolin site" "$c_ok" "$c_off"
+  else
+    printf '  %-28s %soff%s\n' "pangolin site" "$c_dim" "$c_off"
+  fi
+  printf '  %-28s http://127.0.0.1:%s\n' "local" "$WEB_PORT"
+}
+
+cmd_tailscale() {
+  have tailscale || die "tailscale is not installed (sudo pacman -S tailscale)."
+  case "${1:-}" in
+    on)
+      sudo tailscale serve --bg "$WEB_PORT"
+      info "Private URL (tailnet only): $(ts_url || echo 'see: tailscale serve status')"
+      ;;
+    off)
+      sudo tailscale serve --https=443 off
+      info "Tailscale serve disabled"
+      ;;
+    *) die "usage: omarchy-remote tailscale on|off" ;;
+  esac
+}
+
+cmd_pangolin() {
+  case "${1:-}" in
+    connect)
+      if ! have pangolin; then
+        info "Installing the Pangolin CLI (static.pangolin.net)…"
+        curl -fsSL https://static.pangolin.net/get-cli.sh | bash
+      fi
+      cat <<EOF
+In the Pangolin dashboard: Sites -> Add site -> copy the Site ID and Secret.
+(The secret is shown only once; regenerate it if it is masked.)
+EOF
+      local id secret endpoint
+      read -rp "Site ID: " id
+      read -rsp "Secret (hidden): " secret; echo
+      read -rp "Endpoint [$PANGOLIN_ENDPOINT]: " endpoint
+      endpoint="${endpoint:-$PANGOLIN_ENDPOINT}"
+      [[ -n "$id" && -n "$secret" ]] || die "Site ID and secret are required."
+      sudo pangolin service uninstall site >/dev/null 2>&1 || true
+      sudo pangolin service install site --id "$id" --secret "$secret" \
+        --endpoint "$endpoint" --disable-clients --disable-ssh
+      unset secret
+      cat <<EOF
+
+Site installed. In the Pangolin dashboard:
+  1. Resources -> Add public resource (HTTP), target: http://127.0.0.1:$WEB_PORT on this site
+  2. Authentication -> enable "Email whitelist" and add the allowed emails
+  3. Prefer your own domain (CNAME, "DNS only") — free tunnel domains get blocked on some networks
+EOF
+      ;;
+    status)     sudo pangolin service status site ;;
+    logs)       sudo pangolin service logs site ;;
+    disconnect) sudo pangolin service uninstall site ;;
+    *) die "usage: omarchy-remote pangolin connect|status|logs|disconnect" ;;
+  esac
+}
+
+cmd_quality() {
+  [[ "${1:-}" =~ ^[0-9]$ ]] || die "usage: omarchy-remote quality 0-9   (current: $NOVNC_QUALITY)"
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  touch "$CONFIG_FILE"
+  sed -i '/^NOVNC_QUALITY=/d' "$CONFIG_FILE"
+  echo "NOVNC_QUALITY=$1" >> "$CONFIG_FILE"
+  NOVNC_QUALITY="$1"
+  write_novnc_defaults
+  info "Quality set to $1 — reload the browser tab"
+}
+
+cmd_restart() {
+  systemctl --user restart "$VNC_UNIT" "$WEB_UNIT"
+  cmd_status
+}
+
+cmd_uninstall() {
+  require_user
+  info "Stopping and removing services…"
+  systemctl --user disable --now "$VNC_UNIT" "$WEB_UNIT" 2>/dev/null || true
+  rm -f "$UNIT_DIR/$VNC_UNIT" "$UNIT_DIR/$WEB_UNIT"
+  systemctl --user daemon-reload
+  if have tailscale && tailscale serve status 2>/dev/null | grep -q "127.0.0.1:$WEB_PORT"; then
+    sudo tailscale serve --https=443 off || true
+  fi
+  if have pangolin && systemctl is-active --quiet pangolin-site 2>/dev/null; then
+    read -rp "Also disconnect the Pangolin site? [y/N] " a
+    [[ "$a" =~ ^[Yy]$ ]] && sudo pangolin service uninstall site
+  fi
+  rm -rf "$NOVNC_DIR"
+  info "Removed. (wayvnc package left installed: sudo pacman -Rs wayvnc)"
+}
+
+usage() {
+  cat <<EOF
+omarchy-remote $VERSION — browser remote desktop for Omarchy
+
+Usage: omarchy-remote <command>
+
+  setup                      install wayvnc + noVNC and start the services
+  status                     show service and publishing status
+  tailscale on|off           publish privately to your tailnet (HTTPS)
+  pangolin connect           publish via Pangolin (public URL + login)
+  pangolin status|logs|disconnect
+  quality 0-9                image quality (lower = faster on slow links)
+  restart                    restart wayvnc + noVNC
+  uninstall                  remove services and noVNC
+  version
+EOF
+}
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    setup)          cmd_setup "$@" ;;
+    status)         cmd_status "$@" ;;
+    tailscale)      cmd_tailscale "$@" ;;
+    pangolin)       cmd_pangolin "$@" ;;
+    quality)        cmd_quality "$@" ;;
+    restart)        cmd_restart "$@" ;;
+    uninstall)      cmd_uninstall "$@" ;;
+    ensure-display) cmd_ensure_display "$@" ;;
+    version|-v|--version) echo "$VERSION" ;;
+    help|-h|--help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"
