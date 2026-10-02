@@ -3,7 +3,7 @@
 ## What this is
 Browser remote desktop for Omarchy (Hyprland), without containers/K8s/user system.
 Pipeline: browser → Tailscale (private) or Pangolin (public + email OTP login) → noVNC :6080 → wayvnc :5900 → Hyprland.
-Long-term goal: a lightweight personal cloud on top of Omarchy (inspired by Olares OS, without K8s/containers/LarePass):
+Long-term goal: a lightweight personal cloud on top of Omarchy (no Kubernetes, containers, or heavyweight user system):
 "your own computer, managed by AI, reachable anywhere". Planned: zero-config access via a shared domain + self-hosted
 Pangolin relay, an entry page, browser file access, agent skills to manage it in plain language, LAN-device proxying,
 per-user desktops, and distribution through the Omarchy plugin marketplace.
