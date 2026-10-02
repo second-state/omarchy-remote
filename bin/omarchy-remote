@@ -212,6 +212,7 @@ cmd_tailscale() {
 # pg_api METHOD PATH [JSON] — prints the response body; fails on HTTP/API errors.
 # The key is passed to curl through a pipe-backed config file, never on argv.
 pg_api() {
+  local -; set +x   # never trace this function: it handles the API key
   local method="$1" path="$2" out
   local data=(); [[ -n "${3:-}" ]] && data=(--data-binary "$3")
   [[ -r "$PG_KEY_FILE" ]] || die "Not logged in to Pangolin. Run: omarchy-remote pangolin login"
