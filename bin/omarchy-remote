@@ -380,9 +380,10 @@ cmd_expose() {
   trap - EXIT
 
   info "Exposed: https://$fqdn  (auth: $auth)"
+  echo "  A new address needs ~30s for its certificate; 404 or connection errors until then are normal."
   case "$auth" in
     none)  warn "Anyone on the internet can open it." ;;
-    login) echo "  Opens a login page. Allowed: you (Pangolin account)${allow:+ + $allow (email code)}" ;;
+    login) echo "  Opens a login page. Allowed: members of your Pangolin org${allow:+ + $allow (email code)}" ;;
     password)
       echo "  User: $user   Password: $pass   (shown once — save it)"
       echo "  curl -u '$user:$pass' https://$fqdn/" ;;
@@ -403,7 +404,7 @@ cmd_unexpose() {
   id="$(pg_resource_id "$name.$PG_BASE_DOMAIN")"
   [[ -n "$id" ]] || die "$name.$PG_BASE_DOMAIN is not exposed."
   pg_api DELETE "/public-resource/$id" >/dev/null
-  info "Removed https://$name.$PG_BASE_DOMAIN"
+  info "Removed https://$name.$PG_BASE_DOMAIN (may keep answering for a few seconds while Pangolin syncs)"
 }
 
 cmd_list() {
