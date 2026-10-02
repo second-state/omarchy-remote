@@ -1,0 +1,44 @@
+# omarchy-remote — notes for Claude Code
+
+## What this is
+Browser remote desktop for Omarchy (Hyprland), without containers/K8s/user system.
+Pipeline: browser → Tailscale (private) or Pangolin (public + email OTP login) → noVNC :6080 → wayvnc :5900 → Hyprland.
+Long-term goal: a lightweight "personal cloud" add-on for Omarchy (inspired by Olares OS), later an Omarchy Quattro plugin.
+
+## Layout
+- `bin/omarchy-remote` — the CLI (bash). All logic lives here.
+- `install.sh` — one-line installer: clones to `~/.local/share/omarchy-remote/src`, links the CLI into `~/.local/bin`, runs `setup`.
+- `plugin/` — planned Quattro plugin (bar-widget + panel, QML). It must only call the CLI, never need privileges.
+- `README.md` / `README.zh-CN.md` — user docs; keep both in sync.
+
+## Conventions
+- CLI runs as the desktop user; use `sudo` only for pacman, `tailscale serve`, and `pangolin service`.
+- Local services bind to 127.0.0.1 only. Never expose 5900/6080 on other interfaces.
+- systemd **user** units: `omarchy-remote-vnc.service`, `omarchy-remote-web.service` (WantedBy=graphical-session.target).
+- Must pass `shellcheck install.sh bin/omarchy-remote` (CI enforces it).
+- Bump `VERSION` in the CLI for releases.
+
+## Development setup
+- Code is edited on the developer's Mac. The Omarchy test machine is reached over **Tailscale SSH**.
+- Machine-specific details (hostname, user, URLs) go in `CLAUDE.local.md` — gitignored, never commit them.
+- To test on the machine: push a branch, then on the machine run
+  `OMARCHY_REMOTE_REF=<branch> bash install.sh` (or `git pull` in the src dir + `omarchy-remote setup`).
+
+## Hard rules
+- Never read, print, store, or type Pangolin site secrets, Tailscale auth keys, or passwords. The user enters them.
+- Don't change Tailscale ACLs, Pangolin auth settings, or DNS without asking.
+- Ask before anything that would cut off remote access to the test machine (stopping tailscale, the pangolin-site service, or rebooting).
+
+## Gotchas learned
+- macOS may not use Tailscale DNS → `*.ts.net` NXDOMAIN; per-domain fix: `/etc/resolver/ts.net` → `100.100.100.100`.
+- Free Pangolin domains (`*.tunneled.to`) are reset by some ISPs; use a custom domain (CNAME, DNS-only / unproxied).
+- Pangolin "Secret is incorrect" = masked or regenerated secret; regenerate and reconnect.
+- Pangolin CLI: unit is `pangolin-site`; `pangolin service install|uninstall|status|logs site`; flags `--disable-clients --disable-ssh`.
+- noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
+
+## Roadmap
+1. Verify `setup` end-to-end on the test machine (migrates legacy `wayvnc.service`/`novnc.service`).
+2. Survive reboot: auto-login / disk unlock so remote access comes back unattended.
+3. Dedicated 1080p headless output for remote sessions.
+4. Quattro plugin (status + copy URL + toggle).
+5. Sunshine + Moonlight low-latency mode; reverse-proxy other LAN devices.
