@@ -24,16 +24,20 @@ curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/in
 
 它会安装 `wayvnc`，把 noVNC 下载到 `~/.local/share/omarchy-remote/`，并启动两个随桌面自启的用户服务（`omarchy-remote-vnc`、`omarchy-remote-web`）。
 
+以后要升级，再执行一次同样的命令即可。
+
 ## 发布
 
 ### 私有访问：Tailscale
+
+前提：这台机器已经装好并登录了 Tailscale（`sudo pacman -S tailscale`、`sudo systemctl enable --now tailscaled`、`sudo tailscale up`）。
 
 ```bash
 omarchy-remote tailscale on
 # -> https://<机器名>.<tailnet>.ts.net
 ```
 
-在任何登录了同一 Tailscale 账号的设备上打开这个地址即可。
+在任何登录了同一 Tailscale 账号的设备上打开这个地址即可。第一次执行时，Tailscale 可能会打印一个链接，要求你为 tailnet 开启 Serve / HTTPS 证书：打开链接批准后，再执行一次这条命令。
 
 ### 带登录的公网访问：Pangolin
 
@@ -42,6 +46,7 @@ omarchy-remote tailscale on
    ```bash
    omarchy-remote pangolin connect   # 依次输入 ID 和密钥（密钥不会显示在屏幕上）
    ```
+   如果还没装 Pangolin CLI，这条命令会先下载并运行它的官方安装脚本（`https://static.pangolin.net/get-cli.sh`）。
 3. 在后台新建一个 **公开 HTTP 资源**，目标填这个站点上的 `http://127.0.0.1:6080`。
 4. 在 **认证** 里开启 **电子邮件白名单**，加入允许访问的邮箱。
 5. 建议使用自己的域名：**域名 → 添加 → 单个域（CNAME）**，然后在你的 DNS 服务商那里添加两条 CNAME 记录，并关闭代理（Cloudflare 里选“仅 DNS”）。

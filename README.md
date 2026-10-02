@@ -29,16 +29,23 @@ curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/in
 This installs `wayvnc`, downloads noVNC to `~/.local/share/omarchy-remote/`, and starts
 two user services (`omarchy-remote-vnc`, `omarchy-remote-web`) that start with your desktop.
 
+To update later, run the same command again.
+
 ## Publish
 
 ### Private: Tailscale
+
+Requires Tailscale installed and logged in on this machine (`sudo pacman -S tailscale`,
+`sudo systemctl enable --now tailscaled`, `sudo tailscale up`).
 
 ```bash
 omarchy-remote tailscale on
 # -> https://<machine>.<tailnet>.ts.net
 ```
 
-Open the URL on any device logged into your tailnet.
+Open the URL on any device logged into your tailnet. The first time, Tailscale may print a
+link asking you to enable Serve / HTTPS certificates for your tailnet — open it, approve, and
+run the command again.
 
 ### Public with login: Pangolin
 
@@ -48,6 +55,8 @@ Open the URL on any device logged into your tailnet.
    ```bash
    omarchy-remote pangolin connect   # prompts for ID and secret (secret is not echoed)
    ```
+   If the Pangolin CLI is missing, this first downloads and runs its official installer
+   (`https://static.pangolin.net/get-cli.sh`).
 3. In the dashboard, add a **public HTTP resource** targeting `http://127.0.0.1:6080` on that site.
 4. Under **Authentication**, enable **Email whitelist** and add the people you allow.
 5. Recommended: use your own domain (**Domains → Add → Single domain (CNAME)**, then add the
