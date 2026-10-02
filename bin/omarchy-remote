@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -22,12 +22,16 @@ NOVNC_REF="master"
 WEBSOCKIFY_REPO="https://github.com/novnc/websockify"
 WEBSOCKIFY_REF="master"
 PANGOLIN_ENDPOINT="https://app.pangolin.net"
+PANGOLIN_API="https://api.pangolin.net/v1"
 NOVNC_QUALITY=6        # 0-9, lower = smaller/faster
 NOVNC_COMPRESSION=2    # 0-9, higher = more CPU, less bandwidth
 # shellcheck source=/dev/null
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
 NOVNC_DIR="$DATA_DIR/novnc"
+PG_DIR="$(dirname "$CONFIG_FILE")"
+PG_KEY_FILE="$PG_DIR/pangolin.key"   # API key only, mode 600
+PG_ENV_FILE="$PG_DIR/pangolin.env"   # org/site/domain ids (not secret)
 VNC_UNIT="omarchy-remote-vnc.service"
 WEB_UNIT="omarchy-remote-web.service"
 
@@ -204,6 +208,212 @@ cmd_tailscale() {
   esac
 }
 
+# ---- Pangolin Integration API ----------------------------------------------
+# pg_api METHOD PATH [JSON] — prints the response body; fails on HTTP/API errors.
+# The key is passed to curl through a pipe-backed config file, never on argv.
+pg_api() {
+  local method="$1" path="$2" out
+  local data=(); [[ -n "${3:-}" ]] && data=(--data-binary "$3")
+  [[ -r "$PG_KEY_FILE" ]] || die "Not logged in to Pangolin. Run: omarchy-remote pangolin login"
+  out="$(curl -sS --max-time 30 -X "$method" "$PANGOLIN_API$path" \
+           -K <(printf 'header = "Authorization: Bearer %s"\n' "$(<"$PG_KEY_FILE")") \
+           -H 'Content-Type: application/json' "${data[@]}" \
+           -w '\n%{http_code}')" || die "Pangolin API request failed: $method $path"
+  local code="${out##*$'\n'}"; out="${out%$'\n'*}"
+  if [[ "$code" != 2* ]]; then
+    die "Pangolin API $method $path -> HTTP $code: $(json_get "$out" "d.get('message')" 2>/dev/null || echo "$out")"
+  fi
+  printf '%s\n' "$out"
+}
+
+# json_get JSON EXPR — evaluate a Python expression against the parsed JSON (bound to d).
+json_get() {
+  python3 -c 'import sys,json; d=json.loads(sys.argv[1]); r=eval(sys.argv[2]); print(r if isinstance(r,str) else json.dumps(r))' "$1" "$2"
+}
+
+pg_load() {
+  [[ -r "$PG_ENV_FILE" ]] || die "Not logged in to Pangolin. Run: omarchy-remote pangolin login"
+  # shellcheck source=/dev/null
+  source "$PG_ENV_FILE"
+}
+
+# pick LABEL — read "id<TAB>name" lines on stdin; auto-pick a single one, else ask.
+pick() {
+  local label="$1" rows n choice
+  mapfile -t rows
+  n=${#rows[@]}
+  ((n > 0)) || die "No $label found in this Pangolin organization."
+  if ((n == 1)); then printf '%s\n' "${rows[0]%%$'\t'*}"; return; fi
+  local i; for i in "${!rows[@]}"; do printf '  %d) %s\n' $((i+1)) "${rows[i]#*$'\t'}" >&2; done
+  read -rp "Choose $label [1-$n]: " choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > n)); then die "Invalid choice."; fi
+  printf '%s\n' "${rows[choice-1]%%$'\t'*}"
+}
+
+pangolin_login() {
+  cat <<EOF
+Create an API key in the Pangolin dashboard: Organization -> API Keys -> Generate.
+Give it read/write on resources, targets, domains, sites, and access tokens.
+EOF
+  local org key sites site_id domains domain_id base
+  read -rp "Organization ID (the part after app.pangolin.net/ in the dashboard URL): " org
+  read -rsp "API key (hidden): " key; echo
+  [[ -n "$org" && -n "$key" ]] || die "Organization ID and API key are required."
+
+  mkdir -p "$PG_DIR"
+  ( umask 077; printf '%s' "$key" > "$PG_KEY_FILE" )
+  unset key
+
+  sites="$(pg_api GET "/org/$org/sites?pageSize=100")" \
+    || { rm -f "$PG_KEY_FILE"; exit 1; }
+  site_id="$(json_get "$sites" "'\n'.join(str(s['siteId'])+'\t'+s['name'] for s in d['data']['sites'])" | pick site)"
+
+  domains="$(pg_api GET "/org/$org/domains")"
+  # Only NS-delegated domains can host <name>.<domain> for every new service.
+  domain_id="$(json_get "$domains" "'\n'.join(x['domainId']+'\t'+x['baseDomain'] for x in d['data']['domains'] if x['verified'] and x['type']=='ns')" | pick "NS-delegated domain")"
+  base="$(json_get "$domains" "next(x['baseDomain'] for x in d['data']['domains'] if x['domainId']=='$domain_id')")"
+
+  ( umask 077; cat > "$PG_ENV_FILE" <<EOF
+PG_ORG=$org
+PG_SITE_ID=$site_id
+PG_DOMAIN_ID=$domain_id
+PG_BASE_DOMAIN=$base
+EOF
+  )
+  info "Logged in to Pangolin org '$org'. New services will be published as https://<name>.$base"
+}
+
+# ---- expose / unexpose / list ----------------------------------------------
+# Resources we create are named "omarchy-remote:<name>:<auth>" so `list` can
+# tell them apart from ones made by hand and show how each is protected.
+PG_TAG="omarchy-remote"
+
+valid_name() { [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; }
+
+# Print "resourceId<TAB>name<TAB>fullDomain" for every public resource in the org.
+pg_resources() {
+  local r; r="$(pg_api GET "/org/$PG_ORG/public-resources?pageSize=1000")"
+  json_get "$r" "'\n'.join(str(x['resourceId'])+'\t'+x['name']+'\t'+(x.get('fullDomain') or '') for x in d['data']['resources'])"
+}
+
+pg_resource_id() {   # pg_resource_id FQDN -> resourceId (empty if none)
+  pg_resources | awk -F'\t' -v h="$1" '$3 == h { print $1; exit }'
+}
+
+rand_secret() { python3 -c 'import secrets; print(secrets.token_urlsafe(18))'; }
+
+cmd_expose() {
+  local name="" port="" auth="" allow="" user="omarchy" private=0 yes_public=0
+  while (($#)); do
+    case "$1" in
+      --auth)       auth="${2:-}"; shift 2 ;;
+      --auth=*)     auth="${1#*=}"; shift ;;
+      --allow)      allow="${2:-}"; shift 2 ;;
+      --allow=*)    allow="${1#*=}"; shift ;;
+      --user)       user="${2:-}"; shift 2 ;;
+      --private)    private=1; shift ;;
+      --yes-public) yes_public=1; shift ;;
+      -*)           die "Unknown option: $1" ;;
+      *)  if [[ -z "$name" ]]; then name="$1"; elif [[ -z "$port" ]]; then port="$1"; else die "Unexpected argument: $1"; fi; shift ;;
+    esac
+  done
+  [[ -n "$name" && -n "$port" ]] || die "usage: omarchy-remote expose <name> <port> --auth login|token|password|none [--allow emails] | --private"
+  valid_name "$name" || die "Name must be lowercase letters, digits and dashes (it becomes the subdomain)."
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then die "Invalid port: $port"; fi
+  ss -Hltn "sport = :$port" 2>/dev/null | grep -q . || warn "Nothing is listening on port $port yet — the URL will fail until it is."
+
+  if ((private)); then
+    [[ -z "$auth" ]] || die "--private uses your tailnet as the access control; drop --auth."
+    have tailscale || die "tailscale is not installed."
+    sudo tailscale serve --bg --https="$port" "http://127.0.0.1:$port"
+    info "Private URL (tailnet only): $(ts_url || echo "https://<this-machine>.ts.net"):$port"
+    return
+  fi
+
+  case "$auth" in
+    login|token|password) ;;
+    none) ((yes_public)) || die "--auth none makes $name public to the whole internet. Add --yes-public to confirm." ;;
+    "") die "Choose who can reach it: --auth login|token|password|none (or --private)." ;;
+    *)  die "Unknown --auth '$auth' (login|token|password|none)." ;;
+  esac
+  [[ -z "$allow" || "$auth" == login ]] || die "--allow only applies to --auth login."
+
+  pg_load
+  local fqdn="$name.$PG_BASE_DOMAIN" r id
+  [[ -z "$(pg_resource_id "$fqdn")" ]] || die "$fqdn is already exposed. Run: omarchy-remote unexpose $name"
+
+  info "Creating https://$fqdn -> 127.0.0.1:$port"
+  r="$(pg_api PUT "/org/$PG_ORG/public-resource" \
+        "{\"name\":\"$PG_TAG:$name:$auth\",\"subdomain\":\"$name\",\"domainId\":\"$PG_DOMAIN_ID\",\"mode\":\"http\"}")"
+  id="$(json_get "$r" "str(d['data']['resourceId'])")"
+  # From here on, delete the half-made resource if any later step fails (die exits).
+  trap 'warn "Rolling back $fqdn"; pg_api DELETE "/public-resource/'"$id"'" >/dev/null || true' EXIT
+
+  pg_api PUT "/public-resource/$id/target" \
+    "{\"siteId\":$PG_SITE_ID,\"ip\":\"127.0.0.1\",\"port\":$port,\"method\":\"http\",\"enabled\":true}" >/dev/null
+
+  local pass emails tok
+  case "$auth" in
+    none)
+      pg_api POST "/public-resource/$id" '{"sso":false,"emailWhitelistEnabled":false}' >/dev/null
+      ;;
+    login)
+      if [[ -n "$allow" ]]; then
+        emails="$(python3 -c 'import sys,json; print(json.dumps([e.strip() for e in sys.argv[1].split(",") if e.strip()]))' "$allow")"
+        pg_api POST "/public-resource/$id" '{"sso":true,"emailWhitelistEnabled":true}' >/dev/null
+        pg_api POST "/public-resource/$id/whitelist" "{\"emails\":$emails}" >/dev/null
+      else
+        pg_api POST "/public-resource/$id" '{"sso":true}' >/dev/null
+      fi
+      ;;
+    password)
+      pass="$(rand_secret)"
+      pg_api POST "/public-resource/$id" '{"sso":false,"emailWhitelistEnabled":false}' >/dev/null
+      pg_api POST "/public-resource/$id/header-auth" \
+        "{\"user\":\"$user\",\"password\":\"$pass\",\"extendedCompatibility\":true}" >/dev/null
+      ;;
+    token)
+      pg_api POST "/public-resource/$id" '{"sso":true}' >/dev/null
+      tok="$(pg_api POST "/public-resource/$id/access-token" "{\"title\":\"$PG_TAG:$name\"}")"
+      ;;
+  esac
+  trap - EXIT
+
+  info "Exposed: https://$fqdn  (auth: $auth)"
+  echo "  A new address needs ~30s for its certificate; 404 or connection errors until then are normal."
+  case "$auth" in
+    none)  warn "Anyone on the internet can open it." ;;
+    login) echo "  Opens a login page. Allowed: members of your Pangolin org${allow:+ + $allow (email code)}" ;;
+    password)
+      echo "  User: $user   Password: $pass   (shown once — save it)"
+      echo "  curl -u '$user:$pass' https://$fqdn/" ;;
+    token)
+      json_get "$tok" "'  Token ID: '+str(d['data']['accessTokenId'])+'   Token: '+d['data']['accessToken']+'   (shown once — save it)\n  curl -H \"P-Access-Token-Id: '+str(d['data']['accessTokenId'])+'\" -H \"P-Access-Token: '+d['data']['accessToken']+'\" https://$fqdn/'" ;;
+  esac
+}
+
+cmd_unexpose() {
+  local name="${1:-}" id
+  [[ -n "$name" ]] || die "usage: omarchy-remote unexpose <name> [--private <port>]"
+  if [[ "${2:-}" == --private ]]; then
+    [[ "${3:-}" =~ ^[0-9]+$ ]] || die "usage: omarchy-remote unexpose <name> --private <port>"
+    sudo tailscale serve --https="$3" off
+    info "Private URL on port $3 removed"; return
+  fi
+  pg_load
+  id="$(pg_resource_id "$name.$PG_BASE_DOMAIN")"
+  [[ -n "$id" ]] || die "$name.$PG_BASE_DOMAIN is not exposed."
+  pg_api DELETE "/public-resource/$id" >/dev/null
+  info "Removed https://$name.$PG_BASE_DOMAIN (may keep answering for a few seconds while Pangolin syncs)"
+}
+
+cmd_list() {
+  pg_load
+  local r; r="$(pg_api GET "/org/$PG_ORG/public-resources?pageSize=1000")"
+  json_get "$r" "'\n'.join('  %-40s %-8s -> %s' % ('https://'+(x.get('fullDomain') or '?'), x['name'].split(':')[2] if x['name'].startswith('$PG_TAG:') else '(manual)', ', '.join('%s:%s' % (t.get('ip'), t.get('port')) for t in (x.get('targets') or []))) for x in d['data']['resources']) or '  (nothing exposed)'"
+  if have tailscale; then tailscale serve status 2>/dev/null | sed 's/^/  /' || true; fi
+}
+
 cmd_pangolin() {
   case "${1:-}" in
     connect)
@@ -233,10 +443,11 @@ Site installed. In the Pangolin dashboard:
   3. Prefer your own domain (CNAME, "DNS only") — free tunnel domains get blocked on some networks
 EOF
       ;;
+    login)      pangolin_login ;;
     status)     sudo pangolin service status site ;;
     logs)       sudo pangolin service logs site ;;
     disconnect) sudo pangolin service uninstall site ;;
-    *) die "usage: omarchy-remote pangolin connect|status|logs|disconnect" ;;
+    *) die "usage: omarchy-remote pangolin connect|login|status|logs|disconnect" ;;
   esac
 }
 
@@ -281,8 +492,15 @@ Usage: omarchy-remote <command>
 
   setup                      install wayvnc + noVNC and start the services
   status                     show service and publishing status
+  expose <name> <port> --auth login|token|password|none [--allow a@x.com,b@y.com]
+                             publish 127.0.0.1:<port> as https://<name>.<your-domain>
+  expose <name> <port> --private
+                             publish to your tailnet only (https://<machine>.ts.net:<port>)
+  unexpose <name> [--private <port>]
+  list                       show exposed services
   tailscale on|off           publish privately to your tailnet (HTTPS)
   pangolin connect           publish via Pangolin (public URL + login)
+  pangolin login             store a Pangolin API key (needed by expose)
   pangolin status|logs|disconnect
   quality 0-9                image quality (lower = faster on slow links)
   restart                    restart wayvnc + noVNC
@@ -296,6 +514,9 @@ main() {
   case "$cmd" in
     setup)          cmd_setup "$@" ;;
     status)         cmd_status "$@" ;;
+    expose)         cmd_expose "$@" ;;
+    unexpose)       cmd_unexpose "$@" ;;
+    list|ls)        cmd_list "$@" ;;
     tailscale)      cmd_tailscale "$@" ;;
     pangolin)       cmd_pangolin "$@" ;;
     quality)        cmd_quality "$@" ;;
