@@ -133,6 +133,8 @@ PartOf=graphical-session.target
 
 [Service]
 ExecStart=$NOVNC_DIR/utils/novnc_proxy --vnc 127.0.0.1:$VNC_PORT --listen 127.0.0.1:$WEB_PORT
+# novnc_proxy exits 143 on SIGTERM; treat that as a clean stop
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=3
 
@@ -148,6 +150,7 @@ migrate_legacy_units() {
     if [[ -f "$UNIT_DIR/$u" ]] && grep -qE '127\.0\.0\.1[: ](5900|6080)' "$UNIT_DIR/$u"; then
       warn "Replacing legacy $u with omarchy-remote units"
       systemctl --user disable --now "$u" 2>/dev/null || true
+      systemctl --user reset-failed "$u" 2>/dev/null || true
       mv "$UNIT_DIR/$u" "$UNIT_DIR/$u.bak"
     fi
   done
