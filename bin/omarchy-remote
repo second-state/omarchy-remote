@@ -67,8 +67,12 @@ cmd_setup() {
   have pacman || die "This tool targets Omarchy / Arch Linux (pacman not found)."
   have hyprctl || warn "hyprctl not found — is this an Omarchy (Hyprland) machine?"
 
-  info "Installing packages (wayvnc, git, python)…"
-  sudo pacman -S --needed --noconfirm wayvnc git python
+  if pacman -T wayvnc git python >/dev/null; then
+    info "Packages already installed (wayvnc, git, python)"
+  else
+    info "Installing packages (wayvnc, git, python)…"
+    sudo pacman -S --needed --noconfirm wayvnc git python
+  fi
 
   info "Installing noVNC into $NOVNC_DIR"
   mkdir -p "$DATA_DIR"
