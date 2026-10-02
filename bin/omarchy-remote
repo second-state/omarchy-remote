@@ -266,10 +266,11 @@ EOF
 
   sites="$(pg_api GET "/org/$org/sites?pageSize=100")" \
     || { rm -f "$PG_KEY_FILE"; exit 1; }
-  site_id="$(json_get "$sites" '"\n".join(f"{s[\"siteId\"]}\t{s[\"name\"]}" for s in d["data"]["sites"])' | pick site)"
+  site_id="$(json_get "$sites" "'\n'.join(str(s['siteId'])+'\t'+s['name'] for s in d['data']['sites'])" | pick site)"
 
   domains="$(pg_api GET "/org/$org/domains")"
-  domain_id="$(json_get "$domains" '"\n".join(f"{x[\"domainId\"]}\t{x[\"baseDomain\"]} ({x[\"type\"]})" for x in d["data"]["domains"] if x["verified"])' | pick domain)"
+  # Only NS-delegated domains can host <name>.<domain> for every new service.
+  domain_id="$(json_get "$domains" "'\n'.join(x['domainId']+'\t'+x['baseDomain'] for x in d['data']['domains'] if x['verified'] and x['type']=='ns')" | pick "NS-delegated domain")"
   base="$(json_get "$domains" "next(x['baseDomain'] for x in d['data']['domains'] if x['domainId']=='$domain_id')")"
 
   ( umask 077; cat > "$PG_ENV_FILE" <<EOF
