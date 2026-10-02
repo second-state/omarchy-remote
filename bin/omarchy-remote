@@ -22,12 +22,16 @@ NOVNC_REF="master"
 WEBSOCKIFY_REPO="https://github.com/novnc/websockify"
 WEBSOCKIFY_REF="master"
 PANGOLIN_ENDPOINT="https://app.pangolin.net"
+PANGOLIN_API="https://api.pangolin.net/v1"
 NOVNC_QUALITY=6        # 0-9, lower = smaller/faster
 NOVNC_COMPRESSION=2    # 0-9, higher = more CPU, less bandwidth
 # shellcheck source=/dev/null
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
 NOVNC_DIR="$DATA_DIR/novnc"
+PG_DIR="$(dirname "$CONFIG_FILE")"
+PG_KEY_FILE="$PG_DIR/pangolin.key"   # API key only, mode 600
+PG_ENV_FILE="$PG_DIR/pangolin.env"   # org/site/domain ids (not secret)
 VNC_UNIT="omarchy-remote-vnc.service"
 WEB_UNIT="omarchy-remote-web.service"
 
@@ -204,6 +208,80 @@ cmd_tailscale() {
   esac
 }
 
+# ---- Pangolin Integration API ----------------------------------------------
+# pg_api METHOD PATH [JSON] — prints the response body; fails on HTTP/API errors.
+# The key is passed to curl through a pipe-backed config file, never on argv.
+pg_api() {
+  local method="$1" path="$2" out
+  local data=(); [[ -n "${3:-}" ]] && data=(--data-binary "$3")
+  [[ -r "$PG_KEY_FILE" ]] || die "Not logged in to Pangolin. Run: omarchy-remote pangolin login"
+  out="$(curl -sS --max-time 30 -X "$method" "$PANGOLIN_API$path" \
+           -K <(printf 'header = "Authorization: Bearer %s"\n' "$(<"$PG_KEY_FILE")") \
+           -H 'Content-Type: application/json' "${data[@]}" \
+           -w '\n%{http_code}')" || die "Pangolin API request failed: $method $path"
+  local code="${out##*$'\n'}"; out="${out%$'\n'*}"
+  if [[ "$code" != 2* ]]; then
+    die "Pangolin API $method $path -> HTTP $code: $(json_get "$out" "d.get('message')" 2>/dev/null || echo "$out")"
+  fi
+  printf '%s\n' "$out"
+}
+
+# json_get JSON EXPR — evaluate a Python expression against the parsed JSON (bound to d).
+json_get() {
+  python3 -c 'import sys,json; d=json.loads(sys.argv[1]); r=eval(sys.argv[2]); print(r if isinstance(r,str) else json.dumps(r))' "$1" "$2"
+}
+
+pg_load() {
+  [[ -r "$PG_ENV_FILE" ]] || die "Not logged in to Pangolin. Run: omarchy-remote pangolin login"
+  # shellcheck source=/dev/null
+  source "$PG_ENV_FILE"
+}
+
+# pick LABEL — read "id<TAB>name" lines on stdin; auto-pick a single one, else ask.
+pick() {
+  local label="$1" rows n choice
+  mapfile -t rows
+  n=${#rows[@]}
+  ((n > 0)) || die "No $label found in this Pangolin organization."
+  if ((n == 1)); then printf '%s\n' "${rows[0]%%$'\t'*}"; return; fi
+  local i; for i in "${!rows[@]}"; do printf '  %d) %s\n' $((i+1)) "${rows[i]#*$'\t'}" >&2; done
+  read -rp "Choose $label [1-$n]: " choice
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || ((choice < 1 || choice > n)); then die "Invalid choice."; fi
+  printf '%s\n' "${rows[choice-1]%%$'\t'*}"
+}
+
+pangolin_login() {
+  cat <<EOF
+Create an API key in the Pangolin dashboard: Organization -> API Keys -> Generate.
+Give it read/write on resources, targets, domains, sites, and access tokens.
+EOF
+  local org key sites site_id domains domain_id base
+  read -rp "Organization ID (the part after app.pangolin.net/ in the dashboard URL): " org
+  read -rsp "API key (hidden): " key; echo
+  [[ -n "$org" && -n "$key" ]] || die "Organization ID and API key are required."
+
+  mkdir -p "$PG_DIR"
+  ( umask 077; printf '%s' "$key" > "$PG_KEY_FILE" )
+  unset key
+
+  sites="$(pg_api GET "/org/$org/sites?pageSize=100")" \
+    || { rm -f "$PG_KEY_FILE"; exit 1; }
+  site_id="$(json_get "$sites" '"\n".join(f"{s[\"siteId\"]}\t{s[\"name\"]}" for s in d["data"]["sites"])' | pick site)"
+
+  domains="$(pg_api GET "/org/$org/domains")"
+  domain_id="$(json_get "$domains" '"\n".join(f"{x[\"domainId\"]}\t{x[\"baseDomain\"]} ({x[\"type\"]})" for x in d["data"]["domains"] if x["verified"])' | pick domain)"
+  base="$(json_get "$domains" "next(x['baseDomain'] for x in d['data']['domains'] if x['domainId']=='$domain_id')")"
+
+  ( umask 077; cat > "$PG_ENV_FILE" <<EOF
+PG_ORG=$org
+PG_SITE_ID=$site_id
+PG_DOMAIN_ID=$domain_id
+PG_BASE_DOMAIN=$base
+EOF
+  )
+  info "Logged in to Pangolin org '$org'. New services will be published as https://<name>.$base"
+}
+
 cmd_pangolin() {
   case "${1:-}" in
     connect)
@@ -233,10 +311,11 @@ Site installed. In the Pangolin dashboard:
   3. Prefer your own domain (CNAME, "DNS only") — free tunnel domains get blocked on some networks
 EOF
       ;;
+    login)      pangolin_login ;;
     status)     sudo pangolin service status site ;;
     logs)       sudo pangolin service logs site ;;
     disconnect) sudo pangolin service uninstall site ;;
-    *) die "usage: omarchy-remote pangolin connect|status|logs|disconnect" ;;
+    *) die "usage: omarchy-remote pangolin connect|login|status|logs|disconnect" ;;
   esac
 }
 
@@ -283,6 +362,7 @@ Usage: omarchy-remote <command>
   status                     show service and publishing status
   tailscale on|off           publish privately to your tailnet (HTTPS)
   pangolin connect           publish via Pangolin (public URL + login)
+  pangolin login             store a Pangolin API key (needed by expose)
   pangolin status|logs|disconnect
   quality 0-9                image quality (lower = faster on slow links)
   restart                    restart wayvnc + noVNC
