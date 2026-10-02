@@ -34,10 +34,11 @@ Long-term goal: a lightweight "personal cloud" add-on for Omarchy (inspired by O
 - Free Pangolin domains (`*.tunneled.to`) are reset by some ISPs; use a custom domain (CNAME, DNS-only / unproxied).
 - Pangolin "Secret is incorrect" = masked or regenerated secret; regenerate and reconnect.
 - Pangolin CLI: unit is `pangolin-site`; `pangolin service install|uninstall|status|logs site`; flags `--disable-clients --disable-ssh`.
+- `tailscale ssh` may fail with "REMOTE HOST IDENTIFICATION HAS CHANGED": it checks against the host keys in the netmap (OpenSSH's), but Tailscale SSH presents its own key. Use plain `ssh <user>@<tailscale-ip>` instead (port 22 on the Tailscale IP is still served by Tailscale SSH).
 - noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
 
 ## Roadmap
-1. Verify `setup` end-to-end on the test machine (migrates legacy `wayvnc.service`/`novnc.service`).
+1. ~~Verify `setup` end-to-end on the test machine~~ — done 2026-10-02 (legacy units migrated, desktop reachable via Tailscale and Pangolin).
 2. Survive reboot: auto-login / disk unlock so remote access comes back unattended.
 3. Dedicated 1080p headless output for remote sessions.
 4. Quattro plugin (status + copy URL + toggle).
