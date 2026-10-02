@@ -1,8 +1,10 @@
 # omarchy-remote — notes for Claude Code
 
 ## What this is
-Browser remote desktop for Omarchy (Hyprland), without containers/K8s/user system.
-Pipeline: browser → Tailscale (private) or Pangolin (public + email OTP login) → noVNC :6080 → wayvnc :5900 → Hyprland.
+Expose any local service on an Omarchy machine (model API, web app, desktop) with one command and a chosen auth mode — no containers/K8s/user system.
+Core: `omarchy-remote expose <name> <port> --auth login|token|password|none | --private`.
+Public path: Pangolin resource `<name>.<NS-delegated domain>` → site tunnel → 127.0.0.1:<port>. Private path: `tailscale serve --https=<port>`.
+Built-in service: browser remote desktop (noVNC :6080 → wayvnc :5900 → Hyprland).
 Long-term goal: a lightweight personal cloud on top of Omarchy (no Kubernetes, containers, or heavyweight user system):
 "your own computer, managed by AI, reachable anywhere". Planned: zero-config access via a shared domain + self-hosted
 Pangolin relay, an entry page, browser file access, agent skills to manage it in plain language, LAN-device proxying,
@@ -16,6 +18,8 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 
 ## Conventions
 - CLI runs as the desktop user; use `sudo` only for pacman, `tailscale serve`, and `pangolin service`.
+- Pangolin automation goes through the Integration API (`pg_api`), key in `~/.config/omarchy-remote/pangolin.key` (0600, passed to curl via `-K <(...)`, never argv); org/site/domain ids in `pangolin.env`.
+- Resources created by `expose` are named `omarchy-remote:<name>:<auth>`; `list` relies on that.
 - Local services bind to 127.0.0.1 only. Never expose 5900/6080 on other interfaces.
 - systemd **user** units: `omarchy-remote-vnc.service`, `omarchy-remote-web.service` (WantedBy=graphical-session.target).
 - Must pass `shellcheck install.sh bin/omarchy-remote` (CI enforces it).
@@ -38,6 +42,11 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 - Pangolin "Secret is incorrect" = masked or regenerated secret; regenerate and reconnect.
 - Pangolin CLI: unit is `pangolin-site`; `pangolin service install|uninstall|status|logs site`; flags `--disable-clients --disable-ssh`.
 - `tailscale ssh` may fail with "REMOTE HOST IDENTIFICATION HAS CHANGED": it checks against the host keys in the netmap (OpenSSH's), but Tailscale SSH presents its own key. Use plain `ssh <user>@<tailscale-ip>` instead (port 22 on the Tailscale IP is still served by Tailscale SSH).
+- Pangolin API spec: `https://api.pangolin.net/v1/openapi.json`. Responses are `{data, success, error, message, status}`.
+- `--auth login` admits Pangolin org members via SSO without an email code — test the OTP flow in a private window.
+- A new Pangolin hostname takes ~30s (certificate); a deleted one may answer for a few seconds.
+- Only NS-delegated Pangolin domains can host `<name>.<domain>`; CNAME "single domain" entries cannot.
+- When testing `password`/`token` modes, keep generated credentials in a 0600 file on the test machine and read them there; don't print them into the session.
 - noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
 
 ## Roadmap

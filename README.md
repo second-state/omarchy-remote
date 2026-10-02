@@ -1,20 +1,27 @@
 # omarchy-remote
 
-Use your [Omarchy](https://omarchy.org) desktop from any browser — at home, on your
-phone, or shared with someone else — without containers, Kubernetes, or a user system.
+Reach the services on your [Omarchy](https://omarchy.org) machine from anywhere — a local
+model API, a web app you are building, or the desktop itself — with one command and a login
+of your choice. No containers, no Kubernetes, no public IP, no open ports.
 
 ```
-browser ──► Tailscale (private) ─┐
-        └─► Pangolin (public) ───┴─► noVNC :6080 ──► wayvnc :5900 ──► Hyprland
+                         ┌─► 127.0.0.1:11434  (e.g. a model API)
+browser / app ─► Pangolin ┼─► 127.0.0.1:3000   (e.g. your web app)
+   (public + login)       └─► 127.0.0.1:6080   (the desktop, via noVNC)
+your own devices ─► Tailscale (private, peer-to-peer)
 ```
 
-- **wayvnc** streams the Hyprland desktop and sends keyboard/mouse back.
-- **noVNC** turns it into a web page (auto-connect, auto-scale).
-- Both listen on `127.0.0.1` only. Nothing is reachable until you publish it:
-  - **Tailscale** — private HTTPS URL for your own devices. Peer-to-peer, fastest.
-  - **Pangolin** — public URL on your own domain, behind a login (email one-time code).
-    No public IP or open ports needed.
-- No monitor attached? A headless (virtual) output is created automatically.
+```bash
+omarchy-remote expose ai 11434 --auth token
+# -> https://ai.home.example.com  (programs send an access token)
+omarchy-remote expose app 3000 --auth login --allow friend@example.com
+# -> https://app.home.example.com (browser login; your friend gets an email code)
+omarchy-remote expose app 3000 --private
+# -> https://<machine>.<tailnet>.ts.net:3000 (only your own devices)
+```
+
+How your service runs (a binary, a script, a container) is up to you — `expose` only needs a
+port on `127.0.0.1`. The tool also ships a browser remote desktop as a ready-made service.
 
 [中文说明](README.zh-CN.md)
 
@@ -26,49 +33,89 @@ Run as your normal user on the Omarchy machine:
 curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/install.sh | bash
 ```
 
-This installs `wayvnc`, downloads noVNC to `~/.local/share/omarchy-remote/`, and starts
-two user services (`omarchy-remote-vnc`, `omarchy-remote-web`) that start with your desktop.
+This also sets up the remote desktop: it installs `wayvnc`, downloads noVNC to
+`~/.local/share/omarchy-remote/`, and starts two user services (`omarchy-remote-vnc` on
+`127.0.0.1:5900`, `omarchy-remote-web` on `127.0.0.1:6080`) that start with your desktop.
+Nothing is reachable from outside until you expose it.
 
 To update later, run the same command again.
 
-## Publish
+## One-time setup: Pangolin (public URLs)
 
-### Private: Tailscale
+[Pangolin](https://pangolin.net) is the tunnel and login layer. You need an account
+([app.pangolin.net](https://app.pangolin.net), or self-hosted Pangolin ≥ 1.22.0) and a domain.
 
-Requires Tailscale installed and logged in on this machine (`sudo pacman -S tailscale`,
-`sudo systemctl enable --now tailscaled`, `sudo tailscale up`).
-
-```bash
-omarchy-remote tailscale on
-# -> https://<machine>.<tailnet>.ts.net
-```
-
-Open the URL on any device logged into your tailnet. The first time, Tailscale may print a
-link asking you to enable Serve / HTTPS certificates for your tailnet — open it, approve, and
-run the command again.
-
-### Public with login: Pangolin
-
-1. Create a free account at [app.pangolin.net](https://app.pangolin.net) (or self-host Pangolin)
-   and add a **Site**. Copy the Site ID and Secret.
-2. On the Omarchy machine:
+1. **Connect this machine as a site.** In the dashboard: Sites → Add site, copy the Site ID
+   and Secret, then:
    ```bash
    omarchy-remote pangolin connect   # prompts for ID and secret (secret is not echoed)
    ```
    If the Pangolin CLI is missing, this first downloads and runs its official installer
    (`https://static.pangolin.net/get-cli.sh`).
-3. In the dashboard, add a **public HTTP resource** targeting `http://127.0.0.1:6080` on that site.
-4. Under **Authentication**, enable **Email whitelist** and add the people you allow.
-5. Recommended: use your own domain (**Domains → Add → Single domain (CNAME)**, then add the
-   two CNAME records at your DNS provider with proxying **off** / "DNS only").
+2. **Delegate a subdomain to Pangolin**, so every new service gets an address automatically.
+   Dashboard: Domains → Add domain → **Domain delegation (NS)**, e.g. `home.example.com`. Then
+   at your DNS provider add the NS records it shows for `home` (usually
+   `ns1/ns2/ns3.pangolin-ns.net`). Your main domain stays where it is.
+3. **Create an API key** (Organization → API Keys) with read/write on resources, targets,
+   domains, sites and access tokens, then:
+   ```bash
+   omarchy-remote pangolin login     # asks for the org ID and the key (hidden)
+   ```
+   The key is stored in `~/.config/omarchy-remote/pangolin.key` (mode 600).
+
+## One-time setup: Tailscale (private URLs)
+
+Requires Tailscale installed and logged in on this machine (`sudo pacman -S tailscale`,
+`sudo systemctl enable --now tailscaled`, `sudo tailscale up`). The first time you publish,
+Tailscale may print a link asking you to enable Serve / HTTPS certificates for your tailnet —
+open it, approve, and run the command again.
+
+## Expose a service
+
+```bash
+omarchy-remote expose <name> <port> --auth <mode>   # -> https://<name>.<your-domain>
+omarchy-remote expose <name> <port> --private       # -> https://<machine>.ts.net:<port>
+omarchy-remote list
+omarchy-remote unexpose <name>                      # or: unexpose <name> --private <port>
+```
+
+| `--auth` | For | How to get in | Share with someone |
+|---|---|---|---|
+| `login` | people, in a browser | login page: members of your Pangolin org sign in with their account; others get an email code | `--allow a@x.com,b@y.com` |
+| `token` | programs / APIs | headers `P-Access-Token-Id` + `P-Access-Token`, or `?p_token=<id>.<token>` | give them the token |
+| `password` | programs and browsers | HTTP Basic: `curl -u user:pass …` or `https://user:pass@host/` | give them the password |
+| `none` | everyone | no login — requires `--yes-public` | share the URL |
+
+Passwords and tokens are generated for you and **printed once** — save them.
+
+A new address needs about 30 seconds for its certificate (404 / connection errors until then).
+After `unexpose`, it may keep answering for a few seconds while Pangolin syncs.
+
+> Limitation: many OpenAI-compatible clients can only send `Authorization: Bearer <key>`.
+> They can't send Pangolin's token headers, and their Bearer header collides with `password`
+> mode. For those clients, use `--private` for now.
+
+### The remote desktop
+
+```bash
+omarchy-remote expose desktop 6080 --auth login --allow you@example.com
+omarchy-remote expose desktop 6080 --private
+```
+
+Opening the URL connects automatically and scales the desktop to your window.
+No monitor attached? The desktop service tries to create a headless (virtual) output.
 
 ## Commands
 
 ```
-omarchy-remote status                 show what's running and where
-omarchy-remote tailscale on|off
-omarchy-remote pangolin connect|status|logs|disconnect
-omarchy-remote quality 0-9            lower = faster on slow links
+omarchy-remote expose <name> <port> --auth login|token|password|none [--allow emails] [--user name]
+omarchy-remote expose <name> <port> --private
+omarchy-remote unexpose <name> [--private <port>]
+omarchy-remote list                   show exposed services
+omarchy-remote status                 desktop services and connections
+omarchy-remote pangolin connect|login|status|logs|disconnect
+omarchy-remote tailscale on|off       publish the desktop at https://<machine>.ts.net/ (tailnet only)
+omarchy-remote quality 0-9            desktop image quality; lower = faster on slow links
 omarchy-remote restart
 omarchy-remote uninstall
 ```
@@ -80,24 +127,28 @@ Settings can be overridden in `~/.config/omarchy-remote/config` (ports, noVNC qu
 | Symptom | Cause / fix |
 |---|---|
 | `DNS_PROBE_FINISHED_NXDOMAIN` on a `*.ts.net` URL (macOS) | Your Mac isn't using Tailscale DNS. Enable *Use Tailscale DNS settings*, or only for ts.net: `echo "nameserver 100.100.100.100" \| sudo tee /etc/resolver/ts.net` |
+| New URL returns 404 or won't connect | The certificate is still being issued; wait ~30 s. |
+| `--auth login` opens without asking for a code | You are already signed in to Pangolin in that browser (org members get in directly). Try a private window. |
 | `ERR_CONNECTION_RESET` on a free Pangolin domain (`*.tunneled.to` …) | Some ISPs/networks block free tunnel domains. Use your own domain. |
-| Page loads but stays black/grey | The WebSocket is blocked on that network (same cause as above), or the services are down: `omarchy-remote status`. |
+| Desktop page loads but stays black/grey | The WebSocket is blocked on that network (same cause as above), or the services are down: `omarchy-remote status`. |
 | Pangolin log: `Secret is incorrect` | The secret was masked or regenerated. Regenerate it in the dashboard and run `omarchy-remote pangolin connect` again. |
-| Slow | Use the Tailscale URL (direct) instead of Pangolin (relayed), or `omarchy-remote quality 4`. |
+| `Not logged in to Pangolin` / `HTTP 401: Invalid API key` | Run `omarchy-remote pangolin login` (again) with a valid API key. |
+| Desktop is slow | Use a `--private` URL (direct) instead of Pangolin (relayed), or `omarchy-remote quality 4`. |
 | Nothing works after reboot | The desktop must be logged in (services start with the graphical session). Disk encryption / login screen will block remote access. |
 
 ## Security notes
 
-- Anyone who passes the login gets **full control** of your desktop session.
+- Exposed services only need to listen on `127.0.0.1`; Pangolin reaches them through the site tunnel.
+- Treat tokens and passwords like keys: anyone who has one gets in. To revoke, `unexpose` and expose again.
+- Anyone who passes the desktop login gets **full control** of your desktop session.
 - wayvnc has no password and listens on localhost; any local user on the machine could connect to it.
-- All remote users see the **same** desktop (multi-user sessions are not supported yet).
+- All remote desktop users see the **same** desktop (multi-user sessions are not supported yet).
 
 ## Roadmap
 
 - Omarchy Quattro plugin: bar widget + panel (see [`plugin/`](plugin/))
 - Dedicated 1080p virtual output for remote sessions
 - Low-latency streaming via Sunshine + Moonlight
-- Reverse-proxy other LAN devices (`nas.example.com`, …)
 
 ## License
 
