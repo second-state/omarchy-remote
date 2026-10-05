@@ -618,6 +618,17 @@ cf_waf_del() {   # cf_waf_del NAME
   [[ -z "$rid" ]] || cf_api DELETE "/zones/$CF_ZONE_ID/rulesets/$rs/rules/$rid" >/dev/null
 }
 
+# cf_probe FQDN -> HTTP status of https://FQDN/ without credentials. Resolves through
+# Cloudflare DoH so a negative answer cached by the local resolver (the zone's SOA
+# allows up to 30 min) doesn't hide a record we just created.
+cf_probe() {
+  local ip
+  ip="$(curl -s --max-time 5 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$1&type=A" \
+        | python3 -c 'import sys,json; a=[x["data"] for x in json.load(sys.stdin).get("Answer",[]) if x.get("type")==1]; print(a[0] if a else "")' 2>/dev/null)"
+  [[ -n "$ip" ]] || { echo 000; return; }
+  curl -s -o /dev/null --max-time 5 --resolve "$1:443:$ip" -w '%{http_code}' "https://$1/" || true
+}
+
 cf_expose() {
   local name="$1" port="$2" auth="$3" fqdn c key="" code i
   cf_load
@@ -640,7 +651,7 @@ cf_expose() {
   if [[ "$auth" == bearer ]]; then
     info "Waiting for the key check to be active at Cloudflare's edge (up to 2 min)…"
     for i in $(seq 1 40); do
-      code="$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "https://$fqdn/" || true)"
+      code="$(cf_probe "$fqdn")"
       [[ "$code" == 403 ]] && break
       sleep 3
     done
@@ -649,6 +660,7 @@ cf_expose() {
   trap - EXIT
 
   info "Exposed: https://$fqdn  (auth: $auth, via Cloudflare)"
+  echo "  If a device looked this name up before it existed, its DNS cache may say 'not found' for up to 30 min."
   case "$auth" in
     none)   warn "Anyone on the internet can open it." ;;
     bearer)
