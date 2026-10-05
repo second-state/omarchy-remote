@@ -4,7 +4,8 @@
 Expose any local service on an Omarchy machine (model API, web app, desktop) with one command and a chosen auth mode — no containers/K8s/user system.
 Core: `omarchy-remote expose <name> <port>` (private, Tailscale — the default) or `... --auth login|token|password|none [--via pangolin|cloudflare]` (public).
 Private path: `tailscale serve --https=<port>`, tracked by name in `~/.config/omarchy-remote/tailscale.map`.
-Public path: Pangolin resource `<name>.<NS-delegated domain>` → site tunnel → 127.0.0.1:<port>. Cloudflare backend: planned (placeholder).
+Public path: Pangolin resource `<name>.<NS-delegated domain>` → site tunnel → 127.0.0.1:<port> (login/token/password/none),
+or Cloudflare: proxied CNAME `<name>.<zone>` → tunnel `omarchy-remote-<host>` (user unit `omarchy-remote-tunnel`) → 127.0.0.1:<port> (bearer/none; bearer = WAF custom rule).
 Built-in service: browser remote desktop (noVNC :6080 → wayvnc :5900 → Hyprland).
 Long-term goal: a lightweight personal cloud on top of Omarchy (no Kubernetes, containers, or heavyweight user system):
 "your own computer, managed by AI, reachable anywhere". Planned: zero-config access via a shared domain + self-hosted
@@ -51,6 +52,10 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 - systemd user units wanted by `graphical-session.target` must NOT also say `After=graphical-session.target` when another unit orders after them — the target is implicitly After= its wanted units, so it forms a cycle and systemd silently drops a start job at login. Only visible after a real reboot/login, not with `enable --now`.
 - `tailscale serve` needs root unless `sudo tailscale set --operator=<user>` was run; `ts_cmd` tries without sudo first.
 - The Bash tool on the Mac runs zsh: `$var` holding several args is not word-split. Wrap such tests in `bash -c` / `bash <<'EOF'` (see LESSONS.md).
+- Cloudflare: only `<name>.<zone>` (one level) — the free Universal SSL cert doesn't cover deeper names. Never overwrite existing DNS records.
+- Cloudflare negative answers are cached up to 30 min (SOA minimum 1800); probe new hostnames via DoH (`cf_probe`), not the local resolver.
+- WAF custom rules take ~10–30 s to reach the edge; `expose --auth bearer` must see a keyless 403 before reporting success. Free plan: 5 custom rules per zone.
+- Cloudflare API token needs: Account Cloudflare Tunnel Edit; Zone DNS Edit, Zone WAF Edit, Zone Read. Access (login/token on Cloudflare) is not implemented.
 - noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
 
 ## Roadmap

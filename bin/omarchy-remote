@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -825,8 +825,10 @@ omarchy-remote $VERSION — reach local services on your Omarchy machine from an
 Usage: omarchy-remote <command>
 
   expose <name> <port>       private URL via Tailscale (default): https://<machine>.ts.net:<port>
-  expose <name> <port> --auth login|token|password|none [--allow a@x.com,b@y.com] [--via pangolin|cloudflare]
+  expose <name> <port> --auth login|token|password|none [--allow a@x.com,b@y.com] [--via pangolin]
                              public URL https://<name>.<your-domain> behind the chosen login
+  expose <name> <port> --auth bearer|none [--via cloudflare]
+                             public URL via Cloudflare; bearer = API key checked at Cloudflare's edge
   unexpose <name>
   list                       show exposed services
   config set public pangolin|cloudflare
@@ -836,6 +838,7 @@ Usage: omarchy-remote <command>
   tailscale on|off           publish privately to your tailnet (HTTPS)
   pangolin connect           publish via Pangolin (public URL + login)
   pangolin login             store a Pangolin API key (needed by expose)
+  cloudflare login|status    store a Cloudflare API token / show the tunnel service
   pangolin status|logs|disconnect
   quality 0-9                image quality (lower = faster on slow links)
   restart                    restart wayvnc + noVNC
