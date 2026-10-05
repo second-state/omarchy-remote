@@ -719,6 +719,7 @@ cmd_unexpose() {
 }
 
 cmd_list() {
+  [[ "${1:-}" == --json ]] && { list_json; return; }
   echo "Private (Tailscale):"
   if [[ -s "$TS_MAP_FILE" ]]; then
     local base; base="$(ts_url || echo "https://<this-machine>.ts.net")"
@@ -737,6 +738,60 @@ cmd_list() {
     echo "Public (Cloudflare):"
     cf_list
   fi
+}
+
+# Machine-readable list for the Omarchy plugin (and scripts). One provider failing
+# (logged out, API down) doesn't fail the whole list; it shows up in "errors".
+list_json() {
+  local ts_base="" pg="" pg_base="" cf="" cf_ing="" errs=()
+  have tailscale && ts_base="$(ts_url || true)"
+  if [[ -r "$PG_ENV_FILE" ]]; then
+    pg_load; pg_base="$PG_BASE_DOMAIN"
+    pg="$(pg_api GET "/org/$PG_ORG/public-resources?pageSize=1000" 2>/dev/null)" || { pg=""; errs+=(pangolin); }
+  fi
+  if [[ -r "$CF_ENV_FILE" ]]; then
+    cf_load
+    cf="$(cf_api GET "/zones/$CF_ZONE_ID/dns_records?per_page=500&comment.startswith=$PG_TAG:" 2>/dev/null)" || { cf=""; errs+=(cloudflare); }
+    if [[ -n "$cf" && -n "${CF_TUNNEL_ID:-}" ]]; then
+      cf_ing="$(cf_api GET "/accounts/$CF_ACCOUNT/cfd_tunnel/$CF_TUNNEL_ID/configurations" 2>/dev/null)" || cf_ing=""
+    fi
+  fi
+  local vnc web
+  vnc="$(systemctl --user is-active "$VNC_UNIT" 2>/dev/null || true)"
+  web="$(systemctl --user is-active "$WEB_UNIT" 2>/dev/null || true)"
+  python3 - "$TS_MAP_FILE" "$ts_base" "$pg" "$pg_base" "$cf" "$cf_ing" "$vnc" "$web" "${errs[*]:-}" "$VERSION" <<'PY'
+import json, os, sys
+ts_map, ts_base, pg, pg_base, cf, cf_ing, vnc, web, errs, version = sys.argv[1:11]
+out = {"version": version, "services": [], "desktop": {"vnc": vnc == "active", "web": web == "active"},
+       "errors": errs.split() if errs else []}
+if os.path.exists(ts_map):
+    for line in open(ts_map):
+        parts = line.split()
+        if len(parts) == 2:
+            name, port = parts
+            out["services"].append({"name": name, "provider": "tailscale", "auth": "tailnet",
+                                    "url": "%s:%s" % (ts_base, port) if ts_base else "", "target": "127.0.0.1:" + port})
+if pg:
+    for r in json.loads(pg)["data"]["resources"]:
+        name = r.get("name", "")
+        tagged = name.startswith("omarchy-remote:")
+        out["services"].append({
+            "name": name.split(":")[1] if tagged else name,
+            "provider": "pangolin",
+            "auth": name.split(":")[2] if tagged else "manual",
+            "url": "https://" + (r.get("fullDomain") or ""),
+            "target": ", ".join("%s:%s" % (t.get("ip"), t.get("port")) for t in (r.get("targets") or [])),
+        })
+if cf:
+    ing = ((json.loads(cf_ing).get("result") or {}).get("config") or {}).get("ingress") or [] if cf_ing else []
+    svc = {x["hostname"]: x["service"].replace("http://", "") for x in ing if x.get("hostname")}
+    for r in json.loads(cf)["result"]:
+        c = (r.get("comment") or "").split(":")
+        if len(c) == 3 and c[0] == "omarchy-remote":
+            out["services"].append({"name": c[1], "provider": "cloudflare", "auth": c[2],
+                                    "url": "https://" + r["name"], "target": svc.get(r["name"], "")})
+print(json.dumps(out))
+PY
 }
 
 cmd_config() {
@@ -830,7 +885,7 @@ Usage: omarchy-remote <command>
   expose <name> <port> --auth bearer|none [--via cloudflare]
                              public URL via Cloudflare; bearer = API key checked at Cloudflare's edge
   unexpose <name>
-  list                       show exposed services
+  list [--json]              show exposed services (--json: for scripts and the Omarchy plugin)
   config set public pangolin|cloudflare
                              provider used when --auth is given without --via (default: pangolin)
   setup                      install wayvnc + noVNC and start the desktop services
