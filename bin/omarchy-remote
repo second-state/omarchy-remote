@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -23,6 +23,7 @@ WEBSOCKIFY_REPO="https://github.com/novnc/websockify"
 WEBSOCKIFY_REF="master"
 PANGOLIN_ENDPOINT="https://app.pangolin.net"
 PANGOLIN_API="https://api.pangolin.net/v1"
+PUBLIC_VIA="pangolin"  # provider used when --auth is given without --via
 NOVNC_QUALITY=6        # 0-9, lower = smaller/faster
 NOVNC_COMPRESSION=2    # 0-9, higher = more CPU, less bandwidth
 # shellcheck source=/dev/null
@@ -32,6 +33,7 @@ NOVNC_DIR="$DATA_DIR/novnc"
 PG_DIR="$(dirname "$CONFIG_FILE")"
 PG_KEY_FILE="$PG_DIR/pangolin.key"   # API key only, mode 600
 PG_ENV_FILE="$PG_DIR/pangolin.env"   # org/site/domain ids (not secret)
+TS_MAP_FILE="$PG_DIR/tailscale.map"  # "<name> <port>" per private exposure
 VNC_UNIT="omarchy-remote-vnc.service"
 WEB_UNIT="omarchy-remote-web.service"
 
@@ -304,41 +306,93 @@ pg_resource_id() {   # pg_resource_id FQDN -> resourceId (empty if none)
 rand_secret() { python3 -c 'import secrets; print(secrets.token_urlsafe(18))'; }
 
 cmd_expose() {
-  local name="" port="" auth="" allow="" user="omarchy" private=0 yes_public=0
+  local name="" port="" via="" auth="" allow="" user="omarchy" yes_public=0
   while (($#)); do
     case "$1" in
+      --via)        via="${2:-}"; shift 2 ;;
+      --via=*)      via="${1#*=}"; shift ;;
+      --private)    via=tailscale; shift ;;          # alias kept from 0.2
       --auth)       auth="${2:-}"; shift 2 ;;
       --auth=*)     auth="${1#*=}"; shift ;;
       --allow)      allow="${2:-}"; shift 2 ;;
       --allow=*)    allow="${1#*=}"; shift ;;
       --user)       user="${2:-}"; shift 2 ;;
-      --private)    private=1; shift ;;
       --yes-public) yes_public=1; shift ;;
       -*)           die "Unknown option: $1" ;;
       *)  if [[ -z "$name" ]]; then name="$1"; elif [[ -z "$port" ]]; then port="$1"; else die "Unexpected argument: $1"; fi; shift ;;
     esac
   done
-  [[ -n "$name" && -n "$port" ]] || die "usage: omarchy-remote expose <name> <port> --auth login|token|password|none [--allow emails] | --private"
+  [[ -n "$name" && -n "$port" ]] || die "usage: omarchy-remote expose <name> <port> [--via tailscale|pangolin|cloudflare] [--auth login|token|password|none]"
   valid_name "$name" || die "Name must be lowercase letters, digits and dashes (it becomes the subdomain)."
   if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then die "Invalid port: $port"; fi
+
+  # No --via: private by default; asking for an auth mode means a public URL.
+  if [[ -z "$via" ]]; then
+    if [[ -z "$auth" ]]; then via=tailscale; else via="$PUBLIC_VIA"; fi
+  fi
+  case "$via" in
+    tailscale)
+      [[ -z "$auth" ]] || die "Tailscale URLs are private to your tailnet and take no --auth. For a public URL with a login use --via pangolin (or cloudflare)."
+      ;;
+    pangolin|cloudflare)
+      case "$auth" in
+        login|token|password) ;;
+        none) ((yes_public)) || die "--auth none makes $name public to the whole internet. Add --yes-public to confirm." ;;
+        "")   die "Public URLs need --auth login|token|password|none (or drop --via for a private Tailscale URL)." ;;
+        *)    die "Unknown --auth '$auth' (login|token|password|none)." ;;
+      esac
+      [[ -z "$allow" || "$auth" == login ]] || die "--allow only applies to --auth login."
+      ;;
+    *) die "Unknown --via '$via' (tailscale|pangolin|cloudflare)." ;;
+  esac
+  [[ -n "$(expose_owner "$name")" ]] && die "'$name' is already exposed. Run: omarchy-remote unexpose $name"
   ss -Hltn "sport = :$port" 2>/dev/null | grep -q . || warn "Nothing is listening on port $port yet — the URL will fail until it is."
 
-  if ((private)); then
-    [[ -z "$auth" ]] || die "--private uses your tailnet as the access control; drop --auth."
-    have tailscale || die "tailscale is not installed."
-    sudo tailscale serve --bg --https="$port" "http://127.0.0.1:$port"
-    info "Private URL (tailnet only): $(ts_url || echo "https://<this-machine>.ts.net"):$port"
-    return
-  fi
-
-  case "$auth" in
-    login|token|password) ;;
-    none) ((yes_public)) || die "--auth none makes $name public to the whole internet. Add --yes-public to confirm." ;;
-    "") die "Choose who can reach it: --auth login|token|password|none (or --private)." ;;
-    *)  die "Unknown --auth '$auth' (login|token|password|none)." ;;
+  case "$via" in
+    tailscale)  ts_expose "$name" "$port" ;;
+    pangolin)   pg_expose "$name" "$port" "$auth" "$allow" "$user" ;;
+    cloudflare) die "Cloudflare support is planned but not implemented yet. Use --via pangolin, or the default (Tailscale)." ;;
   esac
-  [[ -z "$allow" || "$auth" == login ]] || die "--allow only applies to --auth login."
+}
 
+# expose_owner NAME -> "tailscale" / "pangolin" / "" (not exposed)
+expose_owner() {
+  if [[ -f "$TS_MAP_FILE" ]] && awk -v n="$1" '$1 == n { f=1 } END { exit !f }' "$TS_MAP_FILE"; then
+    echo tailscale; return
+  fi
+  if [[ -r "$PG_ENV_FILE" ]]; then
+    pg_load
+    [[ -n "$(pg_resource_id "$1.$PG_BASE_DOMAIN")" ]] && echo pangolin
+  fi
+  return 0
+}
+
+# ---- Tailscale (private) ----------------------------------------------------
+# Without an operator set (sudo tailscale set --operator=$USER), serve needs root.
+ts_cmd() { tailscale "$@" 2>/dev/null || sudo tailscale "$@"; }
+
+ts_expose() {
+  local name="$1" port="$2"
+  have tailscale || die "tailscale is not installed (see README: One-time setup: Tailscale)."
+  if [[ -f "$TS_MAP_FILE" ]] && awk -v p="$port" '$2 == p { f=1 } END { exit !f }' "$TS_MAP_FILE"; then
+    die "Port $port is already published privately under another name (omarchy-remote list)."
+  fi
+  ts_cmd serve --bg --https="$port" "http://127.0.0.1:$port" >/dev/null
+  mkdir -p "$PG_DIR"; echo "$name $port" >> "$TS_MAP_FILE"
+  info "Exposed privately: $(ts_url || echo "https://<this-machine>.ts.net"):$port  (only devices in your tailnet)"
+}
+
+ts_unexpose() {
+  local name="$1" port
+  port="$(awk -v n="$name" '$1 == n { print $2; exit }' "$TS_MAP_FILE")"
+  ts_cmd serve --https="$port" off >/dev/null
+  awk -v n="$name" '$1 != n' "$TS_MAP_FILE" > "$TS_MAP_FILE.tmp" && mv "$TS_MAP_FILE.tmp" "$TS_MAP_FILE"
+  info "Removed private URL for $name (port $port)"
+}
+
+# ---- Pangolin (public) ------------------------------------------------------
+pg_expose() {
+  local name="$1" port="$2" auth="$3" allow="$4" user="$5"
   pg_load
   local fqdn="$name.$PG_BASE_DOMAIN" r id
   [[ -z "$(pg_resource_id "$fqdn")" ]] || die "$fqdn is already exposed. Run: omarchy-remote unexpose $name"
@@ -394,25 +448,40 @@ cmd_expose() {
 }
 
 cmd_unexpose() {
-  local name="${1:-}" id
-  [[ -n "$name" ]] || die "usage: omarchy-remote unexpose <name> [--private <port>]"
-  if [[ "${2:-}" == --private ]]; then
-    [[ "${3:-}" =~ ^[0-9]+$ ]] || die "usage: omarchy-remote unexpose <name> --private <port>"
-    sudo tailscale serve --https="$3" off
-    info "Private URL on port $3 removed"; return
-  fi
-  pg_load
-  id="$(pg_resource_id "$name.$PG_BASE_DOMAIN")"
-  [[ -n "$id" ]] || die "$name.$PG_BASE_DOMAIN is not exposed."
-  pg_api DELETE "/public-resource/$id" >/dev/null
-  info "Removed https://$name.$PG_BASE_DOMAIN (may keep answering for a few seconds while Pangolin syncs)"
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: omarchy-remote unexpose <name>"
+  case "$(expose_owner "$name")" in
+    tailscale) ts_unexpose "$name" ;;
+    pangolin)
+      pg_api DELETE "/public-resource/$(pg_resource_id "$name.$PG_BASE_DOMAIN")" >/dev/null
+      info "Removed https://$name.$PG_BASE_DOMAIN (may keep answering for a few seconds while Pangolin syncs)" ;;
+    *) die "'$name' is not exposed (omarchy-remote list)." ;;
+  esac
 }
 
 cmd_list() {
-  pg_load
-  local r; r="$(pg_api GET "/org/$PG_ORG/public-resources?pageSize=1000")"
-  json_get "$r" "'\n'.join('  %-40s %-8s -> %s' % ('https://'+(x.get('fullDomain') or '?'), x['name'].split(':')[2] if x['name'].startswith('$PG_TAG:') else '(manual)', ', '.join('%s:%s' % (t.get('ip'), t.get('port')) for t in (x.get('targets') or []))) for x in d['data']['resources']) or '  (nothing exposed)'"
-  if have tailscale; then tailscale serve status 2>/dev/null | sed 's/^/  /' || true; fi
+  echo "Private (Tailscale):"
+  if [[ -s "$TS_MAP_FILE" ]]; then
+    local base; base="$(ts_url || echo "https://<this-machine>.ts.net")"
+    awk -v b="$base" '{ printf "  %-40s -> 127.0.0.1:%s   (%s)\n", b ":" $2, $2, $1 }' "$TS_MAP_FILE"
+  else
+    echo "  (none)"
+  fi
+  if [[ -r "$PG_ENV_FILE" ]]; then
+    pg_load
+    echo "Public (Pangolin):"
+    local r; r="$(pg_api GET "/org/$PG_ORG/public-resources?pageSize=1000")"
+    json_get "$r" "'\n'.join('  %-40s -> %s   (%s)' % ('https://'+(x.get('fullDomain') or '?'), ', '.join('%s:%s' % (t.get('ip'), t.get('port')) for t in (x.get('targets') or [])), 'auth: '+x['name'].split(':')[2] if x['name'].startswith('$PG_TAG:') else 'made by hand') for x in d['data']['resources']) or '  (none)'"
+  fi
+}
+
+cmd_config() {
+  [[ "${1:-}" == set && "${2:-}" == public ]] || die "usage: omarchy-remote config set public pangolin|cloudflare"
+  case "${3:-}" in pangolin|cloudflare) ;; *) die "usage: omarchy-remote config set public pangolin|cloudflare" ;; esac
+  mkdir -p "$(dirname "$CONFIG_FILE")"; touch "$CONFIG_FILE"
+  sed -i '/^PUBLIC_VIA=/d' "$CONFIG_FILE"
+  echo "PUBLIC_VIA=$3" >> "$CONFIG_FILE"
+  info "Public URLs now default to $3 (when --auth is given without --via)"
 }
 
 cmd_pangolin() {
@@ -487,18 +556,19 @@ cmd_uninstall() {
 
 usage() {
   cat <<EOF
-omarchy-remote $VERSION — browser remote desktop for Omarchy
+omarchy-remote $VERSION — reach local services on your Omarchy machine from anywhere
 
 Usage: omarchy-remote <command>
 
-  setup                      install wayvnc + noVNC and start the services
-  status                     show service and publishing status
-  expose <name> <port> --auth login|token|password|none [--allow a@x.com,b@y.com]
-                             publish 127.0.0.1:<port> as https://<name>.<your-domain>
-  expose <name> <port> --private
-                             publish to your tailnet only (https://<machine>.ts.net:<port>)
-  unexpose <name> [--private <port>]
+  expose <name> <port>       private URL via Tailscale (default): https://<machine>.ts.net:<port>
+  expose <name> <port> --auth login|token|password|none [--allow a@x.com,b@y.com] [--via pangolin|cloudflare]
+                             public URL https://<name>.<your-domain> behind the chosen login
+  unexpose <name>
   list                       show exposed services
+  config set public pangolin|cloudflare
+                             provider used when --auth is given without --via (default: pangolin)
+  setup                      install wayvnc + noVNC and start the desktop services
+  status                     show desktop service and publishing status
   tailscale on|off           publish privately to your tailnet (HTTPS)
   pangolin connect           publish via Pangolin (public URL + login)
   pangolin login             store a Pangolin API key (needed by expose)
@@ -518,6 +588,7 @@ main() {
     expose)         cmd_expose "$@" ;;
     unexpose)       cmd_unexpose "$@" ;;
     list|ls)        cmd_list "$@" ;;
+    config)         cmd_config "$@" ;;
     tailscale)      cmd_tailscale "$@" ;;
     pangolin)       cmd_pangolin "$@" ;;
     quality)        cmd_quality "$@" ;;
