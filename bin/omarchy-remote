@@ -455,6 +455,7 @@ cmd_unexpose() {
   case "$(expose_owner "$name")" in
     tailscale) ts_unexpose "$name" ;;
     pangolin)
+      pg_load   # expose_owner ran in a subshell, so load the ids here too
       pg_api DELETE "/public-resource/$(pg_resource_id "$name.$PG_BASE_DOMAIN")" >/dev/null
       info "Removed https://$name.$PG_BASE_DOMAIN (may keep answering for a few seconds while Pangolin syncs)" ;;
     *) die "'$name' is not exposed (omarchy-remote list)." ;;
