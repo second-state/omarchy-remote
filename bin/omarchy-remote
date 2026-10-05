@@ -34,6 +34,10 @@ PG_DIR="$(dirname "$CONFIG_FILE")"
 PG_KEY_FILE="$PG_DIR/pangolin.key"   # API key only, mode 600
 PG_ENV_FILE="$PG_DIR/pangolin.env"   # org/site/domain ids (not secret)
 TS_MAP_FILE="$PG_DIR/tailscale.map"  # "<name> <port>" per private exposure
+CF_KEY_FILE="$PG_DIR/cloudflare.key"            # Cloudflare API token, mode 600
+CF_ENV_FILE="$PG_DIR/cloudflare.env"            # account/zone/tunnel ids (not secret)
+CF_TUNNEL_TOKEN_FILE="$PG_DIR/cloudflare-tunnel.token"  # cloudflared run token, mode 600
+CF_UNIT="omarchy-remote-tunnel.service"
 VNC_UNIT="omarchy-remote-vnc.service"
 WEB_UNIT="omarchy-remote-web.service"
 
@@ -324,13 +328,16 @@ cmd_expose() {
       *)  if [[ -z "$name" ]]; then name="$1"; elif [[ -z "$port" ]]; then port="$1"; else die "Unexpected argument: $1"; fi; shift ;;
     esac
   done
-  [[ -n "$name" && -n "$port" ]] || die "usage: omarchy-remote expose <name> <port> [--via tailscale|pangolin|cloudflare] [--auth login|token|password|none]"
+  [[ -n "$name" && -n "$port" ]] || die "usage: omarchy-remote expose <name> <port> [--via tailscale|pangolin|cloudflare] [--auth login|token|password|bearer|none]"
   valid_name "$name" || die "Name must be lowercase letters, digits and dashes (it becomes the subdomain)."
   if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then die "Invalid port: $port"; fi
 
   # No --via: private by default; asking for an auth mode means a public URL.
+  # bearer exists only on Cloudflare, so it picks Cloudflare by itself.
   if [[ -z "$via" ]]; then
-    if [[ -z "$auth" ]]; then via=tailscale; else via="$PUBLIC_VIA"; fi
+    if [[ -z "$auth" ]]; then via=tailscale
+    elif [[ "$auth" == bearer ]]; then via=cloudflare
+    else via="$PUBLIC_VIA"; fi
   fi
   case "$via" in
     tailscale)
@@ -338,11 +345,17 @@ cmd_expose() {
       ;;
     pangolin|cloudflare)
       case "$auth" in
-        login|token|password) ;;
+        login|token|password|bearer) ;;
         none) ((yes_public)) || die "--auth none makes $name public to the whole internet. Add --yes-public to confirm." ;;
-        "")   die "Public URLs need --auth login|token|password|none (or drop --via for a private Tailscale URL)." ;;
-        *)    die "Unknown --auth '$auth' (login|token|password|none)." ;;
+        "")   die "Public URLs need --auth login|token|password|bearer|none (or drop --via for a private Tailscale URL)." ;;
+        *)    die "Unknown --auth '$auth' (login|token|password|bearer|none)." ;;
       esac
+      if [[ "$via" == pangolin && "$auth" == bearer ]]; then
+        die "--auth bearer is only available with --via cloudflare (Pangolin can't check Bearer keys)."
+      fi
+      if [[ "$via" == cloudflare && "$auth" =~ ^(login|token|password)$ ]]; then
+        die "--auth $auth isn't supported with Cloudflare yet (it needs Cloudflare Access). Use --via pangolin, or --auth bearer|none."
+      fi
       [[ -z "$allow" || "$auth" == login ]] || die "--allow only applies to --auth login."
       ;;
     *) die "Unknown --via '$via' (tailscale|pangolin|cloudflare)." ;;
@@ -353,7 +366,7 @@ cmd_expose() {
   case "$via" in
     tailscale)  ts_expose "$name" "$port" ;;
     pangolin)   pg_expose "$name" "$port" "$auth" "$allow" "$user" ;;
-    cloudflare) die "Cloudflare support is planned but not implemented yet. Use --via pangolin, or the default (Tailscale)." ;;
+    cloudflare) cf_expose "$name" "$port" "$auth" ;;
   esac
 }
 
@@ -364,7 +377,11 @@ expose_owner() {
   fi
   if [[ -r "$PG_ENV_FILE" ]]; then
     pg_load
-    [[ -n "$(pg_resource_id "$1.$PG_BASE_DOMAIN")" ]] && echo pangolin
+    [[ -n "$(pg_resource_id "$1.$PG_BASE_DOMAIN")" ]] && { echo pangolin; return; }
+  fi
+  if [[ -r "$CF_ENV_FILE" ]]; then
+    cf_load
+    [[ "$(cf_dns_comment "$1.$CF_ZONE")" == "$PG_TAG:"* ]] && echo cloudflare
   fi
   return 0
 }
@@ -449,6 +466,232 @@ pg_expose() {
   esac
 }
 
+# ---- Cloudflare (public) ----------------------------------------------------
+# Tunnel (one per machine, run by a user unit) + proxied CNAME per service.
+# --auth bearer adds a WAF custom rule that blocks requests without the key.
+CF_API="https://api.cloudflare.com/client/v4"
+
+# cf_api [--soft] METHOD PATH [JSON] — body on stdout. Dies on API errors unless --soft
+# (then returns 1). The token goes to curl through a pipe-backed config, never argv.
+cf_api() {
+  local -; set +x   # never trace this function: it handles the API token
+  local soft=0; [[ "$1" == --soft ]] && { soft=1; shift; }
+  local method="$1" path="$2" out code
+  local data=(); [[ -n "${3:-}" ]] && data=(--data-binary "$3")
+  [[ -s "$CF_KEY_FILE" ]] || die "Not logged in to Cloudflare. Run: omarchy-remote cloudflare login"
+  out="$(curl -sS --max-time 30 -X "$method" "$CF_API$path" \
+           -K <(printf 'header = "Authorization: Bearer %s"\n' "$(<"$CF_KEY_FILE")") \
+           -H 'Content-Type: application/json' "${data[@]}" -w '\n%{http_code}')" \
+    || die "Cloudflare API request failed: $method $path"
+  code="${out##*$'\n'}"; out="${out%$'\n'*}"
+  if [[ "$code" != 2* ]]; then
+    ((soft)) && { printf '%s\n' "$out"; return 1; }
+    die "Cloudflare API $method $path -> HTTP $code: $(json_get "$out" "'; '.join(e.get('message','') for e in d.get('errors') or [])" 2>/dev/null || echo "$out")"
+  fi
+  printf '%s\n' "$out"
+}
+
+cf_load() {
+  [[ -r "$CF_ENV_FILE" ]] || die "Not logged in to Cloudflare. Run: omarchy-remote cloudflare login"
+  # shellcheck source=/dev/null
+  source "$CF_ENV_FILE"
+}
+
+cf_login() {
+  cat <<EOF
+Create an API token at dash.cloudflare.com -> My Profile -> API Tokens -> Custom token:
+  Account: Cloudflare Tunnel (Edit)      Zone: DNS (Edit), Zone WAF (Edit), Zone (Read)
+limited to your account and the zone (domain) you want to use.
+EOF
+  local key zones zone_id
+  read -rsp "API token (hidden): " key; echo
+  [[ -n "$key" ]] || die "No token entered (nothing saved)."
+  mkdir -p "$PG_DIR"
+  ( umask 077; printf '%s' "$key" > "$CF_KEY_FILE" )
+  info "Saved token (${#key} characters)"
+  unset key
+  cf_api GET /user/tokens/verify >/dev/null || { rm -f "$CF_KEY_FILE"; exit 1; }
+  zones="$(cf_api GET "/zones?per_page=50")"
+  zone_id="$(json_get "$zones" "'\n'.join(z['id']+'\t'+z['name'] for z in d['result'])" | pick "zone (domain)")"
+  json_get "$zones" "next('CF_ZONE_ID=%s\nCF_ZONE=%s\nCF_ACCOUNT=%s' % (z['id'], z['name'], z['account']['id']) for z in d['result'] if z['id']=='$zone_id')" \
+    | ( umask 077; cat > "$CF_ENV_FILE" )
+  cf_load
+  info "Logged in to Cloudflare. Public services will be https://<name>.$CF_ZONE"
+}
+
+cf_bin() {
+  local b; b="$(command -v cloudflared || true)"
+  [[ -n "$b" ]] && { echo "$b"; return; }
+  b="$HOME/.local/bin/cloudflared"
+  if [[ ! -x "$b" ]]; then
+    info "Downloading cloudflared (github.com/cloudflare/cloudflared releases)…" >&2
+    mkdir -p "$(dirname "$b")"
+    curl -fsSL -o "$b.tmp" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+    chmod +x "$b.tmp"; mv "$b.tmp" "$b"
+  fi
+  echo "$b"
+}
+
+# Create (or reuse) this machine's tunnel and make sure its user unit runs.
+cf_ensure_tunnel() {
+  local name r
+  name="$PG_TAG-$(hostname -s)"
+  if [[ -z "${CF_TUNNEL_ID:-}" ]]; then
+    r="$(cf_api GET "/accounts/$CF_ACCOUNT/cfd_tunnel?is_deleted=false&name=$name")"
+    CF_TUNNEL_ID="$(json_get "$r" "d['result'][0]['id'] if d['result'] else ''")"
+    if [[ -z "$CF_TUNNEL_ID" ]]; then
+      info "Creating Cloudflare tunnel $name"
+      r="$(cf_api POST "/accounts/$CF_ACCOUNT/cfd_tunnel" "{\"name\":\"$name\",\"config_src\":\"cloudflare\"}")"
+      CF_TUNNEL_ID="$(json_get "$r" "d['result']['id']")"
+    fi
+    echo "CF_TUNNEL_ID=$CF_TUNNEL_ID" >> "$CF_ENV_FILE"
+  fi
+  if [[ ! -s "$CF_TUNNEL_TOKEN_FILE" ]]; then
+    r="$(cf_api GET "/accounts/$CF_ACCOUNT/cfd_tunnel/$CF_TUNNEL_ID/token")"
+    json_get "$r" "d['result']" | ( umask 077; tr -d '\n' > "$CF_TUNNEL_TOKEN_FILE" )
+  fi
+  if [[ ! -f "$UNIT_DIR/$CF_UNIT" ]]; then
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_DIR/$CF_UNIT" <<EOF
+[Unit]
+Description=omarchy-remote: Cloudflare tunnel ($name)
+After=network-online.target
+
+[Service]
+ExecStart=$(cf_bin) tunnel --no-autoupdate run --token-file $CF_TUNNEL_TOKEN_FILE
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+  fi
+  systemctl --user enable --now "$CF_UNIT" >/dev/null 2>&1 || systemctl --user start "$CF_UNIT"
+}
+
+# cf_ingress add FQDN PORT | del FQDN — edit the tunnel's remotely-managed ingress list.
+cf_ingress() {
+  local r new
+  r="$(cf_api GET "/accounts/$CF_ACCOUNT/cfd_tunnel/$CF_TUNNEL_ID/configurations")"
+  new="$(python3 - "$r" "$1" "$2" "${3:-}" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1]); op, host, port = sys.argv[2], sys.argv[3], sys.argv[4]
+rules = [x for x in (((d.get("result") or {}).get("config") or {}).get("ingress") or [])
+         if x.get("hostname") and x.get("hostname") != host]
+if op == "add":
+    rules.append({"hostname": host, "service": "http://127.0.0.1:%s" % port})
+rules.append({"service": "http_status:404"})
+print(json.dumps({"config": {"ingress": rules}}))
+PY
+)"
+  cf_api PUT "/accounts/$CF_ACCOUNT/cfd_tunnel/$CF_TUNNEL_ID/configurations" "$new" >/dev/null
+}
+
+cf_dns_comment() {   # FQDN -> comment of its DNS record ("" if none; "-" if record has no comment)
+  local r; r="$(cf_api GET "/zones/$CF_ZONE_ID/dns_records?name=$1")"
+  json_get "$r" "(d['result'][0].get('comment') or '-') if d['result'] else ''"
+}
+
+cf_waf_ruleset() {   # -> id of the zone's custom-rules entrypoint ("" if none yet)
+  local r
+  r="$(cf_api --soft GET "/zones/$CF_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint")" || { echo ""; return 0; }
+  json_get "$r" "d['result']['id']"
+}
+
+cf_waf_add() {   # cf_waf_add NAME FQDN KEY
+  local rule rs
+  rule="$(python3 -c 'import json,sys; n,h,k=sys.argv[1:4]; print(json.dumps({"description":"omarchy-remote:"+n,"action":"block","expression":"(http.host eq \"%s\" and not any(lower(http.request.headers[\"authorization\"][*])[*] eq \"bearer %s\"))" % (h,k)}))' "$1" "$2" "$3")"
+  rs="$(cf_waf_ruleset)"
+  if [[ -z "$rs" ]]; then
+    cf_api PUT "/zones/$CF_ZONE_ID/rulesets/phases/http_request_firewall_custom/entrypoint" "{\"rules\":[$rule]}" >/dev/null
+  else
+    cf_api POST "/zones/$CF_ZONE_ID/rulesets/$rs/rules" "$rule" >/dev/null
+  fi
+}
+
+cf_waf_del() {   # cf_waf_del NAME
+  local rs r rid
+  rs="$(cf_waf_ruleset)"; [[ -n "$rs" ]] || return 0
+  r="$(cf_api GET "/zones/$CF_ZONE_ID/rulesets/$rs")"
+  rid="$(json_get "$r" "next((x['id'] for x in d['result'].get('rules',[]) if x.get('description')=='omarchy-remote:$1'), '')")"
+  [[ -z "$rid" ]] || cf_api DELETE "/zones/$CF_ZONE_ID/rulesets/$rs/rules/$rid" >/dev/null
+}
+
+cf_expose() {
+  local name="$1" port="$2" auth="$3" fqdn c key="" code i
+  cf_load
+  fqdn="$name.$CF_ZONE"
+  c="$(cf_dns_comment "$fqdn")"
+  [[ -z "$c" ]] || die "$fqdn already has a DNS record (not made by omarchy-remote, or exposed already). Pick another name."
+  cf_ensure_tunnel
+
+  info "Creating https://$fqdn -> 127.0.0.1:$port (Cloudflare)"
+  trap 'warn "Rolling back $fqdn"; cf_waf_del "'"$name"'" || true; r=$(cf_api --soft GET "/zones/$CF_ZONE_ID/dns_records?name='"$fqdn"'") && id=$(json_get "$r" "d[\"result\"][0][\"id\"] if d[\"result\"] else \"\"") && [[ -n "$id" ]] && cf_api --soft DELETE "/zones/$CF_ZONE_ID/dns_records/$id" >/dev/null; cf_ingress del "'"$fqdn"'" || true' EXIT
+  if [[ "$auth" == bearer ]]; then
+    key="sk-omr-$(python3 -c 'import secrets; print(secrets.token_hex(24))')"   # lowercase: the rule compares lower()-ed headers
+    cf_waf_add "$name" "$fqdn" "$key"
+  fi
+  cf_ingress add "$fqdn" "$port"
+  cf_api POST "/zones/$CF_ZONE_ID/dns_records" \
+    "{\"type\":\"CNAME\",\"name\":\"$fqdn\",\"content\":\"$CF_TUNNEL_ID.cfargotunnel.com\",\"proxied\":true,\"comment\":\"$PG_TAG:$name:$auth\"}" >/dev/null
+
+  # Self-check: a bearer URL must refuse requests without the key before we report success.
+  if [[ "$auth" == bearer ]]; then
+    info "Waiting for the key check to be active at Cloudflare's edge (up to 2 min)…"
+    for i in $(seq 1 40); do
+      code="$(curl -s -o /dev/null --max-time 5 -w '%{http_code}' "https://$fqdn/" || true)"
+      [[ "$code" == 403 ]] && break
+      sleep 3
+    done
+    [[ "$code" == 403 ]] || die "The URL still answers without the key (HTTP $code) — not publishing it."
+  fi
+  trap - EXIT
+
+  info "Exposed: https://$fqdn  (auth: $auth, via Cloudflare)"
+  case "$auth" in
+    none)   warn "Anyone on the internet can open it." ;;
+    bearer)
+      echo "  Key: $key   (shown once — save it)"
+      echo "  curl -H 'Authorization: Bearer $key' https://$fqdn/"
+      echo "  OpenAI-compatible clients: base_url https://$fqdn/v1, api_key $key" ;;
+  esac
+}
+
+cf_unexpose() {
+  local name="$1" fqdn r id
+  fqdn="$name.$CF_ZONE"
+  r="$(cf_api GET "/zones/$CF_ZONE_ID/dns_records?name=$fqdn")"
+  id="$(json_get "$r" "d['result'][0]['id'] if d['result'] else ''")"
+  [[ -z "$id" ]] || cf_api DELETE "/zones/$CF_ZONE_ID/dns_records/$id" >/dev/null
+  cf_ingress del "$fqdn"
+  cf_waf_del "$name"
+  info "Removed https://$fqdn (Cloudflare)"
+}
+
+cf_list() {
+  local r ing
+  r="$(cf_api GET "/zones/$CF_ZONE_ID/dns_records?per_page=500&comment.startswith=$PG_TAG:")"
+  ing="{}"; [[ -n "${CF_TUNNEL_ID:-}" ]] && ing="$(cf_api GET "/accounts/$CF_ACCOUNT/cfd_tunnel/$CF_TUNNEL_ID/configurations")"
+  python3 - "$r" "$ing" <<'PY'
+import json, sys
+recs = json.loads(sys.argv[1])["result"]
+cfg = ((json.loads(sys.argv[2]).get("result") or {}).get("config") or {}).get("ingress") or []
+svc = {x["hostname"]: x["service"].replace("http://", "") for x in cfg if x.get("hostname")}
+rows = ["  %-40s -> %s   (auth: %s)" % ("https://" + r["name"], svc.get(r["name"], "?"), r["comment"].split(":")[2])
+        for r in recs if (r.get("comment") or "").startswith("omarchy-remote:")]
+print("\n".join(rows) or "  (none)")
+PY
+}
+
+cmd_cloudflare() {
+  case "${1:-}" in
+    login)  cf_login ;;
+    status) systemctl --user status "$CF_UNIT" --no-pager ;;
+    *) die "usage: omarchy-remote cloudflare login|status" ;;
+  esac
+}
+
 cmd_unexpose() {
   local name="${1:-}"
   [[ -n "$name" ]] || die "usage: omarchy-remote unexpose <name>"
@@ -458,6 +701,7 @@ cmd_unexpose() {
       pg_load   # expose_owner ran in a subshell, so load the ids here too
       pg_api DELETE "/public-resource/$(pg_resource_id "$name.$PG_BASE_DOMAIN")" >/dev/null
       info "Removed https://$name.$PG_BASE_DOMAIN (may keep answering for a few seconds while Pangolin syncs)" ;;
+    cloudflare) cf_load; cf_unexpose "$name" ;;
     *) die "'$name' is not exposed (omarchy-remote list)." ;;
   esac
 }
@@ -475,6 +719,11 @@ cmd_list() {
     echo "Public (Pangolin):"
     local r; r="$(pg_api GET "/org/$PG_ORG/public-resources?pageSize=1000")"
     json_get "$r" "'\n'.join('  %-40s -> %s   (%s)' % ('https://'+(x.get('fullDomain') or '?'), ', '.join('%s:%s' % (t.get('ip'), t.get('port')) for t in (x.get('targets') or [])), 'auth: '+x['name'].split(':')[2] if x['name'].startswith('$PG_TAG:') else 'made by hand') for x in d['data']['resources']) or '  (none)'"
+  fi
+  if [[ -r "$CF_ENV_FILE" ]]; then
+    cf_load
+    echo "Public (Cloudflare):"
+    cf_list
   fi
 }
 
@@ -592,6 +841,7 @@ main() {
     unexpose)       cmd_unexpose "$@" ;;
     list|ls)        cmd_list "$@" ;;
     config)         cmd_config "$@" ;;
+    cloudflare)     cmd_cloudflare "$@" ;;
     tailscale)      cmd_tailscale "$@" ;;
     pangolin)       cmd_pangolin "$@" ;;
     quality)        cmd_quality "$@" ;;
