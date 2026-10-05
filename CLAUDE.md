@@ -2,8 +2,9 @@
 
 ## What this is
 Expose any local service on an Omarchy machine (model API, web app, desktop) with one command and a chosen auth mode — no containers/K8s/user system.
-Core: `omarchy-remote expose <name> <port> --auth login|token|password|none | --private`.
-Public path: Pangolin resource `<name>.<NS-delegated domain>` → site tunnel → 127.0.0.1:<port>. Private path: `tailscale serve --https=<port>`.
+Core: `omarchy-remote expose <name> <port>` (private, Tailscale — the default) or `... --auth login|token|password|none [--via pangolin|cloudflare]` (public).
+Private path: `tailscale serve --https=<port>`, tracked by name in `~/.config/omarchy-remote/tailscale.map`.
+Public path: Pangolin resource `<name>.<NS-delegated domain>` → site tunnel → 127.0.0.1:<port>. Cloudflare backend: planned (placeholder).
 Built-in service: browser remote desktop (noVNC :6080 → wayvnc :5900 → Hyprland).
 Long-term goal: a lightweight personal cloud on top of Omarchy (no Kubernetes, containers, or heavyweight user system):
 "your own computer, managed by AI, reachable anywhere". Planned: zero-config access via a shared domain + self-hosted
@@ -47,6 +48,9 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 - A new Pangolin hostname takes ~30s (certificate); a deleted one may answer for a few seconds.
 - Only NS-delegated Pangolin domains can host `<name>.<domain>`; CNAME "single domain" entries cannot.
 - When testing `password`/`token` modes, keep generated credentials in a 0600 file on the test machine and read them there; don't print them into the session.
+- systemd user units wanted by `graphical-session.target` must NOT also say `After=graphical-session.target` when another unit orders after them — the target is implicitly After= its wanted units, so it forms a cycle and systemd silently drops a start job at login. Only visible after a real reboot/login, not with `enable --now`.
+- `tailscale serve` needs root unless `sudo tailscale set --operator=<user>` was run; `ts_cmd` tries without sudo first.
+- The Bash tool on the Mac runs zsh: `$var` holding several args is not word-split. Wrap such tests in `bash -c` / `bash <<'EOF'` (see LESSONS.md).
 - noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
 
 ## Roadmap

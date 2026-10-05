@@ -10,13 +10,15 @@
 ```
 
 ```bash
-omarchy-remote expose ai 11434 --auth token
-# -> https://ai.home.example.com （程序带访问令牌调用）
+omarchy-remote expose app 3000
+# -> https://<机器名>.<tailnet>.ts.net:3000（默认走 Tailscale，只有你自己的设备能访问）
 omarchy-remote expose app 3000 --auth login --allow friend@example.com
-# -> https://app.home.example.com（浏览器登录；朋友用邮箱验证码进入）
-omarchy-remote expose app 3000 --private
-# -> https://<机器名>.<tailnet>.ts.net:3000（只有你自己的设备能访问）
+# -> https://app.home.example.com（公网；浏览器登录，朋友用邮箱验证码进入）
+omarchy-remote expose ai 11434 --auth token
+# -> https://ai.home.example.com （公网；程序带访问令牌调用）
 ```
+
+私有地址走 **Tailscale**（个人使用免费，不需要域名）。公网地址走 **Pangolin**；Cloudflare 作为另一个选择正在计划中（`--via cloudflare`）。
 
 服务怎么跑（二进制、脚本还是容器）由你决定，`expose` 只要求它在 `127.0.0.1` 上监听一个端口。工具还自带一个浏览器远程桌面，作为现成的服务。
 
@@ -31,6 +33,12 @@ curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/in
 安装时会顺带配好远程桌面：安装 `wayvnc`，把 noVNC 下载到 `~/.local/share/omarchy-remote/`，并启动两个随桌面自启的用户服务（`omarchy-remote-vnc` 在 `127.0.0.1:5900`，`omarchy-remote-web` 在 `127.0.0.1:6080`）。在你执行 expose 之前，外部什么都访问不到。
 
 以后要升级，再执行一次同样的命令即可。
+
+## 一次性配置：Tailscale（私有地址）
+
+前提：这台机器已经装好并登录了 Tailscale（`sudo pacman -S tailscale`、`sudo systemctl enable --now tailscaled`、`sudo tailscale up`）。第一次发布时，Tailscale 可能会打印一个链接，要求你为 tailnet 开启 Serve / HTTPS 证书：打开链接批准后，再执行一次命令。
+
+可选：执行一次 `sudo tailscale set --operator=$USER`，以后 `expose` 就不需要 sudo。
 
 ## 一次性配置：Pangolin（公网地址）
 
@@ -48,18 +56,16 @@ curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/in
    ```
    密钥保存在 `~/.config/omarchy-remote/pangolin.key`（权限 600）。
 
-## 一次性配置：Tailscale（私有地址）
-
-前提：这台机器已经装好并登录了 Tailscale（`sudo pacman -S tailscale`、`sudo systemctl enable --now tailscaled`、`sudo tailscale up`）。第一次发布时，Tailscale 可能会打印一个链接，要求你为 tailnet 开启 Serve / HTTPS 证书：打开链接批准后，再执行一次命令。
-
 ## 暴露一个服务
 
 ```bash
-omarchy-remote expose <名字> <端口> --auth <方式>   # -> https://<名字>.<你的域名>
-omarchy-remote expose <名字> <端口> --private       # -> https://<机器名>.ts.net:<端口>
+omarchy-remote expose <名字> <端口>                 # 私有：https://<机器名>.ts.net:<端口>
+omarchy-remote expose <名字> <端口> --auth <方式>   # 公网：https://<名字>.<你的域名>
 omarchy-remote list
-omarchy-remote unexpose <名字>                      # 或：unexpose <名字> --private <端口>
+omarchy-remote unexpose <名字>
 ```
+
+不带 `--auth` 时是私有地址（Tailscale）。带了 `--auth` 就是公网地址，走 `--via pangolin|cloudflare` 指定的提供方；不写 `--via` 时用 `omarchy-remote config set public <提供方>` 设置的默认值（初始为 `pangolin`）。
 
 | `--auth` | 给谁用 | 怎么进入 | 分享给别人 |
 |---|---|---|---|
@@ -72,13 +78,13 @@ omarchy-remote unexpose <名字>                      # 或：unexpose <名字> 
 
 新地址需要大约 30 秒签发证书，在此之前出现 404 或连不上是正常的。`unexpose` 之后，地址可能还会响应几秒，等 Pangolin 同步完就会失效。
 
-> 限制：很多兼容 OpenAI 接口的客户端只能发送 `Authorization: Bearer <key>`。它们发不了 Pangolin 的令牌请求头，Bearer 头也会和 `password` 方式冲突。这类客户端目前请用 `--private`。
+> 限制：很多兼容 OpenAI 接口的客户端只能发送 `Authorization: Bearer <key>`。它们发不了 Pangolin 的令牌请求头，Bearer 头也会和 `password` 方式冲突。这类客户端目前请用私有地址（默认方式）。
 
 ### 远程桌面
 
 ```bash
+omarchy-remote expose desktop 6080
 omarchy-remote expose desktop 6080 --auth login --allow you@example.com
-omarchy-remote expose desktop 6080 --private
 ```
 
 打开地址会自动连接，并按窗口大小缩放桌面。
@@ -87,9 +93,10 @@ omarchy-remote expose desktop 6080 --private
 ## 常用命令
 
 ```
-omarchy-remote expose <名字> <端口> --auth login|token|password|none [--allow 邮箱] [--user 用户名]
-omarchy-remote expose <名字> <端口> --private
-omarchy-remote unexpose <名字> [--private <端口>]
+omarchy-remote expose <名字> <端口>   通过 Tailscale 生成私有地址
+omarchy-remote expose <名字> <端口> --auth login|token|password|none [--allow 邮箱] [--user 用户名] [--via pangolin|cloudflare]
+omarchy-remote unexpose <名字>
+omarchy-remote config set public pangolin|cloudflare
 omarchy-remote list                   查看已暴露的服务
 omarchy-remote status                 查看桌面服务和连接状态
 omarchy-remote pangolin connect|login|status|logs|disconnect
@@ -112,8 +119,8 @@ omarchy-remote uninstall
 | 桌面页面打开了但一直是黑屏或灰屏 | 当前网络拦截了 WebSocket（原因同上），或者服务没在运行：`omarchy-remote status`。 |
 | Pangolin 日志出现 `Secret is incorrect` | 复制的密钥被隐藏了，或者已经重新生成过。到后台重新生成，再执行一次 `omarchy-remote pangolin connect`。 |
 | `Not logged in to Pangolin` / `HTTP 401: Invalid API key` | 用有效的 API 密钥（重新）执行 `omarchy-remote pangolin login`。 |
-| 桌面速度慢 | 自己用时走 `--private` 地址（直连），别走 Pangolin（中转）；或者 `omarchy-remote quality 4`。 |
-| 重启后连不上 | 桌面必须已经登录（服务跟随图形会话启动）。全盘加密解锁或登录界面会挡住远程访问。 |
+| 桌面速度慢 | 自己用时走私有（Tailscale）地址，是直连；别走 Pangolin（中转）；或者 `omarchy-remote quality 4`。 |
+| 重启后连不上 | 桌面必须已经登录（服务跟随图形会话启动）。全盘加密解锁或登录界面会挡住远程访问。如果装的是 0.2 或更早的版本，请重新执行安装命令：新版修复了一个导致桌面网页服务登录后起不来的启动顺序 bug。 |
 
 ## 安全提示
 
