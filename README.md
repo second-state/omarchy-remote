@@ -12,13 +12,16 @@ your own devices ─► Tailscale (private, peer-to-peer)
 ```
 
 ```bash
-omarchy-remote expose ai 11434 --auth token
-# -> https://ai.home.example.com  (programs send an access token)
+omarchy-remote expose app 3000
+# -> https://<machine>.<tailnet>.ts.net:3000 (default: Tailscale, only your own devices)
 omarchy-remote expose app 3000 --auth login --allow friend@example.com
-# -> https://app.home.example.com (browser login; your friend gets an email code)
-omarchy-remote expose app 3000 --private
-# -> https://<machine>.<tailnet>.ts.net:3000 (only your own devices)
+# -> https://app.home.example.com (public; browser login, your friend gets an email code)
+omarchy-remote expose ai 11434 --auth token
+# -> https://ai.home.example.com  (public; programs send an access token)
 ```
+
+Private URLs go through **Tailscale** (free for personal use, no domain needed). Public URLs
+go through **Pangolin**; Cloudflare is planned as an alternative (`--via cloudflare`).
 
 How your service runs (a binary, a script, a container) is up to you — `expose` only needs a
 port on `127.0.0.1`. The tool also ships a browser remote desktop as a ready-made service.
@@ -39,6 +42,15 @@ This also sets up the remote desktop: it installs `wayvnc`, downloads noVNC to
 Nothing is reachable from outside until you expose it.
 
 To update later, run the same command again.
+
+## One-time setup: Tailscale (private URLs)
+
+Requires Tailscale installed and logged in on this machine (`sudo pacman -S tailscale`,
+`sudo systemctl enable --now tailscaled`, `sudo tailscale up`). The first time you publish,
+Tailscale may print a link asking you to enable Serve / HTTPS certificates for your tailnet —
+open it, approve, and run the command again.
+
+Optional, so `expose` doesn't need sudo: `sudo tailscale set --operator=$USER`.
 
 ## One-time setup: Pangolin (public URLs)
 
@@ -63,21 +75,18 @@ To update later, run the same command again.
    ```
    The key is stored in `~/.config/omarchy-remote/pangolin.key` (mode 600).
 
-## One-time setup: Tailscale (private URLs)
-
-Requires Tailscale installed and logged in on this machine (`sudo pacman -S tailscale`,
-`sudo systemctl enable --now tailscaled`, `sudo tailscale up`). The first time you publish,
-Tailscale may print a link asking you to enable Serve / HTTPS certificates for your tailnet —
-open it, approve, and run the command again.
-
 ## Expose a service
 
 ```bash
-omarchy-remote expose <name> <port> --auth <mode>   # -> https://<name>.<your-domain>
-omarchy-remote expose <name> <port> --private       # -> https://<machine>.ts.net:<port>
+omarchy-remote expose <name> <port>                 # private: https://<machine>.ts.net:<port>
+omarchy-remote expose <name> <port> --auth <mode>   # public:  https://<name>.<your-domain>
 omarchy-remote list
-omarchy-remote unexpose <name>                      # or: unexpose <name> --private <port>
+omarchy-remote unexpose <name>
 ```
+
+Without `--auth` the URL is private (Tailscale). With `--auth` it is public, through the
+provider in `--via pangolin|cloudflare`, or the default set with
+`omarchy-remote config set public <provider>` (initially `pangolin`).
 
 | `--auth` | For | How to get in | Share with someone |
 |---|---|---|---|
@@ -93,13 +102,13 @@ After `unexpose`, it may keep answering for a few seconds while Pangolin syncs.
 
 > Limitation: many OpenAI-compatible clients can only send `Authorization: Bearer <key>`.
 > They can't send Pangolin's token headers, and their Bearer header collides with `password`
-> mode. For those clients, use `--private` for now.
+> mode. For those clients, use a private URL (the default) for now.
 
 ### The remote desktop
 
 ```bash
+omarchy-remote expose desktop 6080
 omarchy-remote expose desktop 6080 --auth login --allow you@example.com
-omarchy-remote expose desktop 6080 --private
 ```
 
 Opening the URL connects automatically and scales the desktop to your window.
@@ -108,9 +117,10 @@ No monitor attached? The desktop service tries to create a headless (virtual) ou
 ## Commands
 
 ```
-omarchy-remote expose <name> <port> --auth login|token|password|none [--allow emails] [--user name]
-omarchy-remote expose <name> <port> --private
-omarchy-remote unexpose <name> [--private <port>]
+omarchy-remote expose <name> <port>   private URL via Tailscale
+omarchy-remote expose <name> <port> --auth login|token|password|none [--allow emails] [--user name] [--via pangolin|cloudflare]
+omarchy-remote unexpose <name>
+omarchy-remote config set public pangolin|cloudflare
 omarchy-remote list                   show exposed services
 omarchy-remote status                 desktop services and connections
 omarchy-remote pangolin connect|login|status|logs|disconnect
@@ -133,8 +143,8 @@ Settings can be overridden in `~/.config/omarchy-remote/config` (ports, noVNC qu
 | Desktop page loads but stays black/grey | The WebSocket is blocked on that network (same cause as above), or the services are down: `omarchy-remote status`. |
 | Pangolin log: `Secret is incorrect` | The secret was masked or regenerated. Regenerate it in the dashboard and run `omarchy-remote pangolin connect` again. |
 | `Not logged in to Pangolin` / `HTTP 401: Invalid API key` | Run `omarchy-remote pangolin login` (again) with a valid API key. |
-| Desktop is slow | Use a `--private` URL (direct) instead of Pangolin (relayed), or `omarchy-remote quality 4`. |
-| Nothing works after reboot | The desktop must be logged in (services start with the graphical session). Disk encryption / login screen will block remote access. |
+| Desktop is slow | Use a private (Tailscale) URL — direct — instead of Pangolin (relayed), or `omarchy-remote quality 4`. |
+| Nothing works after reboot | The desktop must be logged in (services start with the graphical session). Disk encryption / login screen will block remote access. If you installed 0.2 or earlier, re-run the installer: it fixes a unit-ordering bug that stopped the desktop web service from starting at login. |
 
 ## Security notes
 
