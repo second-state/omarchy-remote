@@ -119,7 +119,9 @@ write_units() {
   cat > "$UNIT_DIR/$VNC_UNIT" <<EOF
 [Unit]
 Description=omarchy-remote: wayvnc (Hyprland desktop on 127.0.0.1:$VNC_PORT)
-After=graphical-session.target
+# No After=graphical-session.target: the target already orders itself after the
+# units it wants, so that line plus web's After=vnc formed a cycle and systemd
+# dropped the web unit at login. ensure-display + Restart= cover a late Hyprland.
 PartOf=graphical-session.target
 
 [Service]
