@@ -14,11 +14,11 @@ omarchy-remote expose app 3000
 # -> https://<机器名>.<tailnet>.ts.net:3000（默认走 Tailscale，只有你自己的设备能访问）
 omarchy-remote expose app 3000 --auth login --allow friend@example.com
 # -> https://app.home.example.com（公网；浏览器登录，朋友用邮箱验证码进入）
-omarchy-remote expose ai 11434 --auth token
-# -> https://ai.home.example.com （公网；程序带访问令牌调用）
+omarchy-remote expose ai 11434 --auth bearer
+# -> https://ai.example.com      （公网；OpenAI 风格的客户端用 "Authorization: Bearer <key>" 调用）
 ```
 
-私有地址走 **Tailscale**（个人使用免费，不需要域名）。公网地址走 **Pangolin**；Cloudflare 作为另一个选择正在计划中（`--via cloudflare`）。
+私有地址走 **Tailscale**（个人使用免费，不需要域名）。公网地址走 **Pangolin**（浏览器登录、访问令牌、密码），或者走 **Cloudflare**（在 Cloudflare 边缘校验 API key，兼容 OpenAI 风格的客户端和 SDK，包括流式输出）。
 
 服务怎么跑（二进制、脚本还是容器）由你决定，`expose` 只要求它在 `127.0.0.1` 上监听一个端口。工具还自带一个浏览器远程桌面，作为现成的服务。
 
@@ -56,6 +56,19 @@ curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/in
    ```
    密钥保存在 `~/.config/omarchy-remote/pangolin.key`（权限 600）。
 
+## 一次性配置：Cloudflare（公网地址、API key）
+
+需要一个托管在 Cloudflare 上的域名，免费版就够。服务地址是 `https://<名字>.<域名>`：只能在域名下一层，这样 Cloudflare 免费证书才能覆盖。
+
+1. 创建 API 令牌：我的个人资料 → API 令牌 → 创建令牌 → 自定义令牌。权限选 **帐户：Cloudflare Tunnel（编辑）**，以及 **区域：DNS（编辑）、区域 WAF（编辑）、区域（读取）**，作用范围限定为你的帐户和这个域名。
+2. 在 Omarchy 机器上执行：
+   ```bash
+   omarchy-remote cloudflare login   # 输入令牌（不会显示）并选择域名
+   ```
+   第一次 `expose` 时，会创建一条名为 `omarchy-remote-<主机名>` 的隧道；如果本机没有 `cloudflared`，会先下载它，然后用用户服务 `omarchy-remote-tunnel` 运行。
+
+已有的 DNS 记录不会被覆盖，请选一个没有被占用的名字。
+
 ## 暴露一个服务
 
 ```bash
@@ -65,20 +78,21 @@ omarchy-remote list
 omarchy-remote unexpose <名字>
 ```
 
-不带 `--auth` 时是私有地址（Tailscale）。带了 `--auth` 就是公网地址，走 `--via pangolin|cloudflare` 指定的提供方；不写 `--via` 时用 `omarchy-remote config set public <提供方>` 设置的默认值（初始为 `pangolin`）。
+不带 `--auth` 时是私有地址（Tailscale）。带了 `--auth` 就是公网地址，走 `--via pangolin|cloudflare` 指定的提供方；不写 `--via` 时用 `omarchy-remote config set public <提供方>` 设置的默认值（初始为 `pangolin`；`--auth bearer` 总是走 Cloudflare）。
 
-| `--auth` | 给谁用 | 怎么进入 | 分享给别人 |
-|---|---|---|---|
-| `login` | 人，用浏览器 | 登录页：Pangolin 组织成员用账号直接登录，其他人用邮箱验证码 | `--allow a@x.com,b@y.com` |
-| `token` | 程序 / API | 请求头 `P-Access-Token-Id` + `P-Access-Token`，或 `?p_token=<id>.<token>` | 把令牌发给对方 |
-| `password` | 程序和浏览器都行 | HTTP Basic：`curl -u 用户:密码 …` 或 `https://用户:密码@域名/` | 把密码发给对方 |
-| `none` | 所有人 | 不需要登录，必须加 `--yes-public` 确认 | 直接发地址 |
+| `--auth` | 给谁用 | 怎么进入 | 分享给别人 | 提供方 |
+|---|---|---|---|---|
+| `login` | 人，用浏览器 | 登录页：Pangolin 组织成员用账号直接登录，其他人用邮箱验证码 | `--allow a@x.com,b@y.com` | Pangolin |
+| `token` | 程序 / API | 请求头 `P-Access-Token-Id` + `P-Access-Token`，或 `?p_token=<id>.<token>` | 把令牌发给对方 | Pangolin |
+| `password` | 程序和浏览器都行 | HTTP Basic：`curl -u 用户:密码 …` 或 `https://用户:密码@域名/` | 把密码发给对方 | Pangolin |
+| `bearer` | 程序、OpenAI 风格的客户端 | `Authorization: Bearer <key>`（比如 `base_url=https://ai.example.com/v1`，`api_key=<key>`） | 把 key 发给对方 | Cloudflare |
+| `none` | 所有人 | 不需要登录，必须加 `--yes-public` 确认 | 直接发地址 | Pangolin、Cloudflare |
 
-密码和令牌由工具自动生成，**只显示一次**，请自己保存好。
+密码、令牌和 key 都由工具自动生成，**只显示一次**，请自己保存好。
 
-新地址需要大约 30 秒签发证书，在此之前出现 404 或连不上是正常的。`unexpose` 之后，地址可能还会响应几秒，等 Pangolin 同步完就会失效。
+Pangolin 的新地址需要大约 30 秒签发证书，在此之前出现 404 或连不上是正常的。`expose --auth bearer` 会等到 Cloudflare 确实拒绝不带 key 的请求后才报告成功（通常 10～30 秒）。`unexpose` 之后，地址可能还会响应几秒。
 
-> 限制：很多兼容 OpenAI 接口的客户端只能发送 `Authorization: Bearer <key>`。它们发不了 Pangolin 的令牌请求头，Bearer 头也会和 `password` 方式冲突。这类客户端目前请用私有地址（默认方式）。
+> 每个 `bearer` 服务占用一条 Cloudflare WAF 自定义规则。免费版每个域名最多 5 条，跟你自己建的规则共用。能打开你 Cloudflare 后台的人，都能看到这些规则里的 key。
 
 ### 远程桌面
 
@@ -94,12 +108,14 @@ omarchy-remote expose desktop 6080 --auth login --allow you@example.com
 
 ```
 omarchy-remote expose <名字> <端口>   通过 Tailscale 生成私有地址
-omarchy-remote expose <名字> <端口> --auth login|token|password|none [--allow 邮箱] [--user 用户名] [--via pangolin|cloudflare]
+omarchy-remote expose <名字> <端口> --auth login|token|password|none [--allow 邮箱] [--user 用户名] [--via pangolin]
+omarchy-remote expose <名字> <端口> --auth bearer|none [--via cloudflare]
 omarchy-remote unexpose <名字>
 omarchy-remote config set public pangolin|cloudflare
 omarchy-remote list                   查看已暴露的服务
 omarchy-remote status                 查看桌面服务和连接状态
 omarchy-remote pangolin connect|login|status|logs|disconnect
+omarchy-remote cloudflare login|status
 omarchy-remote tailscale on|off       把桌面发布到 https://<机器名>.ts.net/（仅 tailnet）
 omarchy-remote quality 0-9            桌面画质；数值越低，慢网速下越流畅
 omarchy-remote restart
@@ -114,6 +130,7 @@ omarchy-remote uninstall
 |---|---|
 | Mac 打开 `*.ts.net` 地址报 `DNS_PROBE_FINISHED_NXDOMAIN` | Mac 没用 Tailscale 的 DNS。开启 *Use Tailscale DNS settings*，或只对 ts.net 生效：`echo "nameserver 100.100.100.100" \| sudo tee /etc/resolver/ts.net` |
 | 新地址返回 404 或连不上 | 证书还在签发，等 30 秒左右。 |
+| Cloudflare 新地址只在某一台设备上报"找不到服务器" | 这台设备在记录创建之前查询过这个名字，缓存了"不存在"的结果（最长 30 分钟）。等一会儿，或者清一下它的 DNS 缓存。 |
 | `--auth login` 没要求验证码就直接打开了 | 这个浏览器已经登录了 Pangolin（组织成员可直接进入）。用无痕窗口试。 |
 | Pangolin 免费域名（`*.tunneled.to` 等）报 `ERR_CONNECTION_RESET` | 部分运营商或网络会拦截免费隧道域名，换成自己的域名即可。 |
 | 桌面页面打开了但一直是黑屏或灰屏 | 当前网络拦截了 WebSocket（原因同上），或者服务没在运行：`omarchy-remote status`。 |
