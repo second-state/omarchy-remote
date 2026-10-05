@@ -104,6 +104,14 @@ omarchy-remote expose desktop 6080 --auth login --allow you@example.com
 打开地址会自动连接，并按窗口大小缩放桌面。
 没接显示器？桌面服务会尝试创建一块虚拟屏幕。
 
+## 状态栏小组件（Omarchy 插件）
+
+```bash
+omarchy plugin add https://github.com/second-state/omarchy-remote-plugin --enable
+```
+
+显示这台机器暴露了哪些服务，每个地址都可以一键复制或打开（[详情](https://github.com/second-state/omarchy-remote-plugin)）。
+
 ## 常用命令
 
 ```
@@ -149,7 +157,6 @@ omarchy-remote uninstall
 
 ## 计划
 
-- Omarchy Quattro 插件：状态栏小组件 + 面板（见 [`plugin/`](plugin/)）
 - 专门给远程用的 1080p 虚拟屏幕
 - 基于 Sunshine + Moonlight 的低延迟串流
 
