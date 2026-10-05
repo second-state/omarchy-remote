@@ -60,7 +60,7 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 
 ## Roadmap
 1. ~~Verify `setup` end-to-end on the test machine~~ — done 2026-10-02 (legacy units migrated, desktop reachable via Tailscale and Pangolin).
-2. Survive reboot: auto-login / disk unlock so remote access comes back unattended.
+2. ~~Survive reboot unattended~~ — deferred 2026-10-05 by decision. SDDM autologin already works; what blocks is the LUKS passphrase at boot (plus no power-on-after-AC-loss in BIOS). The test machine sits in an office, so downtime after a power cut is accepted. If revisited: TPM2 unlock needs switching Omarchy's `encrypt` hook to `sd-encrypt` + `rd.luks` cmdline (Omarchy updates may revert it); keep the passphrase keyslot.
 3. Dedicated 1080p headless output for remote sessions.
 4. Quattro plugin (status + copy URL + toggle).
 5. Sunshine + Moonlight low-latency mode; reverse-proxy other LAN devices.
