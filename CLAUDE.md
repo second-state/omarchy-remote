@@ -2,10 +2,10 @@
 
 ## What this is
 Expose any local service on an Omarchy machine (model API, web app, desktop) with one command and a chosen auth mode — no containers/K8s/user system.
-Core: `omarchy-remote expose <name> <port>` (private, Tailscale — the default) or `... --auth login|token|password|none [--via pangolin|cloudflare]` (public).
+Core: `omarchy-remote expose <name> <port>` (private, Tailscale — the default) or `... --auth login|token|password|bearer|none [--via cloudflare|pangolin]` (public; default provider Cloudflare, or Pangolin if only it is set up).
 Private path: `tailscale serve --https=<port>`, tracked by name in `~/.config/omarchy-remote/tailscale.map`.
 Public path: Pangolin resource `<name>.<NS-delegated domain>` → site tunnel → 127.0.0.1:<port> (login/token/password/none),
-or Cloudflare: proxied CNAME `<name>.<zone>` → tunnel `omarchy-remote-<host>` (user unit `omarchy-remote-tunnel`) → 127.0.0.1:<port> (bearer/none; bearer = WAF custom rule).
+or Cloudflare: proxied CNAME `<name>.<zone>` → tunnel `omarchy-remote-<host>` (user unit `omarchy-remote-tunnel`) → 127.0.0.1:<port> (login/token = Cloudflare Access, bearer = WAF custom rule, none).
 Built-in service: browser remote desktop (noVNC :6080 → wayvnc :5900 → Hyprland).
 Long-term goal: a lightweight personal cloud on top of Omarchy (no Kubernetes, containers, or heavyweight user system):
 "your own computer, managed by AI, reachable anywhere". Planned: zero-config access via a shared domain + self-hosted
@@ -55,7 +55,10 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 - Cloudflare: only `<name>.<zone>` (one level) — the free Universal SSL cert doesn't cover deeper names. Never overwrite existing DNS records.
 - Cloudflare negative answers are cached up to 30 min (SOA minimum 1800); probe new hostnames via DoH (`cf_probe`), not the local resolver.
 - WAF custom rules take ~10–30 s to reach the edge; `expose --auth bearer` must see a keyless 403 before reporting success. Free plan: 5 custom rules per zone.
-- Cloudflare API token needs: Account Cloudflare Tunnel Edit; Zone DNS Edit, Zone WAF Edit, Zone Read. Access (login/token on Cloudflare) is not implemented.
+- Cloudflare API token needs: Account Cloudflare Tunnel Edit; Zone DNS Edit, Zone WAF Edit, Zone Read. `login`/`token` on Cloudflare also need Zero Trust on the account plus Access: Apps and Policies, Service Tokens, and Organizations/IdPs/Groups (Edit).
+- Cloudflare `login`/`token` = Access app `omarchy-remote:<name>:<auth>` + reusable policy `omarchy-remote:<name>` (emails / service token, decision `non_identity`) + service token `omarchy-remote:<name>`. Inline policies in the app body can't carry `include`; create the policy first, delete the app before its policy. Never verified against a live Zero Trust org: the test account's org belongs to Eros (don't use it); mock tests only.
+- Cloudflare `password` is refused: a WAF block can't send `WWW-Authenticate`, so browsers would never get a prompt.
+- Rollback traps run after errexit has unwound the function, so locals are gone: bake values into the trap string (`'"$fqdn"'`), don't reference `$fqdn` inside it.
 - noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
 
 ## Roadmap

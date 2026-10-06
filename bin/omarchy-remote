@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.5.0"
+VERSION="0.6.0"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -23,7 +23,7 @@ WEBSOCKIFY_REPO="https://github.com/novnc/websockify"
 WEBSOCKIFY_REF="master"
 PANGOLIN_ENDPOINT="https://app.pangolin.net"
 PANGOLIN_API="https://api.pangolin.net/v1"
-PUBLIC_VIA="pangolin"  # provider used when --auth is given without --via
+PUBLIC_VIA=""         # provider used when --auth is given without --via ("" = auto, see cmd_expose)
 NOVNC_QUALITY=6        # 0-9, lower = smaller/faster
 NOVNC_COMPRESSION=2    # 0-9, higher = more CPU, less bandwidth
 # shellcheck source=/dev/null
@@ -333,11 +333,15 @@ cmd_expose() {
   if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then die "Invalid port: $port"; fi
 
   # No --via: private by default; asking for an auth mode means a public URL.
-  # bearer exists only on Cloudflare, so it picks Cloudflare by itself.
+  # bearer exists only on Cloudflare and password only on Pangolin, so they pick their provider.
   if [[ -z "$via" ]]; then
     if [[ -z "$auth" ]]; then via=tailscale
     elif [[ "$auth" == bearer ]]; then via=cloudflare
-    else via="$PUBLIC_VIA"; fi
+    elif [[ "$auth" == password ]]; then via=pangolin
+    elif [[ -n "$PUBLIC_VIA" ]]; then via="$PUBLIC_VIA"
+    # Not configured: Cloudflare, unless only Pangolin is set up on this machine.
+    elif [[ -r "$PG_ENV_FILE" && ! -r "$CF_ENV_FILE" ]]; then via=pangolin
+    else via=cloudflare; fi
   fi
   case "$via" in
     tailscale)
@@ -353,8 +357,11 @@ cmd_expose() {
       if [[ "$via" == pangolin && "$auth" == bearer ]]; then
         die "--auth bearer is only available with --via cloudflare (Pangolin can't check Bearer keys)."
       fi
-      if [[ "$via" == cloudflare && "$auth" =~ ^(login|token|password)$ ]]; then
-        die "--auth $auth isn't supported with Cloudflare yet (it needs Cloudflare Access). Use --via pangolin, or --auth bearer|none."
+      if [[ "$via" == cloudflare && "$auth" == password ]]; then
+        die "--auth password isn't available with Cloudflare (browsers can't get a password prompt there). Use --via pangolin, or --auth login|token|bearer."
+      fi
+      if [[ "$via" == cloudflare && "$auth" == login && -z "$allow" ]]; then
+        die "With Cloudflare, --auth login needs --allow a@x.com[,b@y.com] (who may sign in with an email code)."
       fi
       [[ -z "$allow" || "$auth" == login ]] || die "--allow only applies to --auth login."
       ;;
@@ -366,7 +373,7 @@ cmd_expose() {
   case "$via" in
     tailscale)  ts_expose "$name" "$port" ;;
     pangolin)   pg_expose "$name" "$port" "$auth" "$allow" "$user" ;;
-    cloudflare) cf_expose "$name" "$port" "$auth" ;;
+    cloudflare) cf_expose "$name" "$port" "$auth" "$allow" ;;
   esac
 }
 
@@ -421,7 +428,7 @@ pg_expose() {
         "{\"name\":\"$PG_TAG:$name:$auth\",\"subdomain\":\"$name\",\"domainId\":\"$PG_DOMAIN_ID\",\"mode\":\"http\"}")"
   id="$(json_get "$r" "str(d['data']['resourceId'])")"
   # From here on, delete the half-made resource if any later step fails (die exits).
-  trap 'warn "Rolling back $fqdn"; pg_api DELETE "/public-resource/'"$id"'" >/dev/null || true' EXIT
+  trap 'warn "Rolling back '"$fqdn"'"; pg_api DELETE "/public-resource/'"$id"'" >/dev/null || true' EXIT
 
   pg_api PUT "/public-resource/$id/target" \
     "{\"siteId\":$PG_SITE_ID,\"ip\":\"127.0.0.1\",\"port\":$port,\"method\":\"http\",\"enabled\":true}" >/dev/null
@@ -502,6 +509,9 @@ cf_login() {
 Create an API token at dash.cloudflare.com -> My Profile -> API Tokens -> Custom token:
   Account: Cloudflare Tunnel (Edit)      Zone: DNS (Edit), Zone WAF (Edit), Zone (Read)
 limited to your account and the zone (domain) you want to use.
+For --auth login|token also add (and enable Zero Trust, free plan, on the account):
+  Account: Access: Apps and Policies (Edit), Access: Service Tokens (Edit),
+           Access: Organizations, Identity Providers, and Groups (Edit)
 EOF
   local key zones zone_id
   read -rsp "API token (hidden): " key; echo
@@ -618,6 +628,85 @@ cf_waf_del() {   # cf_waf_del NAME
   [[ -z "$rid" ]] || cf_api DELETE "/zones/$CF_ZONE_ID/rulesets/$rs/rules/$rid" >/dev/null
 }
 
+# ---- Cloudflare Access (--auth login|token) ----
+# One self-hosted Access app per service, named omarchy-remote:<name>:<auth>, guarded by
+# one reusable policy omarchy-remote:<name>: allowed emails (login, email one-time code)
+# or one service token omarchy-remote:<name> (token). Needs Zero Trust on the account.
+
+cf_otp_idp() {   # -> id of the account's one-time PIN login method (created if missing)
+  local r id
+  r="$(cf_api --soft GET "/accounts/$CF_ACCOUNT/access/identity_providers")" \
+    || die "Cloudflare Access isn't available: $(json_get "$r" "'; '.join(e.get('message','') for e in d.get('errors') or [])" 2>/dev/null)
+Enable Zero Trust (free plan) for this account in the dashboard, and give the API token the Access permissions (see: omarchy-remote cloudflare login)."
+  id="$(json_get "$r" "next((x['id'] for x in d['result'] if x.get('type')=='onetimepin'), '')")"
+  if [[ -z "$id" ]]; then
+    info "Enabling email one-time-code login in your Cloudflare Zero Trust organization" >&2
+    r="$(cf_api POST "/accounts/$CF_ACCOUNT/access/identity_providers" '{"name":"One-time PIN","type":"onetimepin","config":{}}')"
+    id="$(json_get "$r" "d['result']['id']")"
+  fi
+  echo "$id"
+}
+
+# cf_access_add NAME FQDN login|token [EMAILS] — for token, the new service token's JSON
+# (client id + secret, shown once) is left in CF_SERVICE_TOKEN.
+cf_access_add() {
+  local name="$1" fqdn="$2" auth="$3" allow="${4:-}" idp="" r body pol
+  CF_SERVICE_TOKEN=""
+  if [[ "$auth" == token ]]; then
+    CF_SERVICE_TOKEN="$(cf_api POST "/accounts/$CF_ACCOUNT/access/service_tokens" "{\"name\":\"$PG_TAG:$name\"}")"
+  else
+    idp="$(cf_otp_idp)"
+  fi
+  body="$(python3 - "$PG_TAG:$name" "$auth" "$allow" "$CF_SERVICE_TOKEN" <<'PY'
+import json, sys
+name, auth, allow, st = sys.argv[1:5]
+if auth == "token":
+    rules, decision = [{"service_token": {"token_id": json.loads(st)["result"]["id"]}}], "non_identity"
+else:
+    rules, decision = [{"email": {"email": e.strip()}} for e in allow.split(",") if e.strip()], "allow"
+print(json.dumps({"name": name, "decision": decision, "include": rules}))
+PY
+)"
+  r="$(cf_api POST "/accounts/$CF_ACCOUNT/access/policies" "$body")"
+  pol="$(json_get "$r" "d['result']['id']")"
+  body="$(python3 - "$PG_TAG:$name:$auth" "$fqdn" "$pol" "$idp" <<'PY'
+import json, sys
+name, fqdn, pol, idp = sys.argv[1:5]
+app = {"name": name, "domain": fqdn, "type": "self_hosted", "session_duration": "24h",
+       "app_launcher_visible": False, "policies": [{"id": pol, "precedence": 1}]}
+if idp:   # login: straight to the email-code page, no other login methods offered
+    app.update(allowed_idps=[idp], auto_redirect_to_identity=True)
+print(json.dumps(app))
+PY
+)"
+  if ! r="$(cf_api --soft POST "/accounts/$CF_ACCOUNT/access/apps" "$body")"; then
+    cf_api --soft DELETE "/accounts/$CF_ACCOUNT/access/policies/$pol" >/dev/null || true   # nothing else points at it
+    die "Cloudflare Access app for $fqdn: $(json_get "$r" "'; '.join(e.get('message','') for e in d.get('errors') or [])" 2>/dev/null || echo "$r")"
+  fi
+}
+
+# cf_access_del NAME FQDN — remove the app, then its policy, then its service token.
+# Tolerates pieces that are already gone (also used for rollback).
+cf_access_del() {
+  local name="$1" fqdn="$2" r ids app pol st
+  r="$(cf_api --soft GET "/accounts/$CF_ACCOUNT/access/apps?domain=$fqdn")" || return 0
+  ids="$(json_get "$r" "'\n'.join(a['id'] for a in d['result'] or [] if a.get('domain')=='$fqdn' and (a.get('name') or '').startswith('$PG_TAG:$name:'))")"
+  for app in $ids; do
+    r="$(cf_api GET "/accounts/$CF_ACCOUNT/access/apps/$app")"
+    cf_api DELETE "/accounts/$CF_ACCOUNT/access/apps/$app" >/dev/null
+    while read -r pol st; do
+      [[ -n "$pol" ]] || continue
+      cf_api --soft DELETE "/accounts/$CF_ACCOUNT/access/policies/$pol" >/dev/null || warn "Couldn't delete Access policy $pol"
+      [[ "$st" == - ]] || cf_api --soft DELETE "/accounts/$CF_ACCOUNT/access/service_tokens/$st" >/dev/null || warn "Couldn't delete service token $st"
+    done < <(json_get "$r" "'\n'.join('%s %s' % (p['id'], next((i['service_token']['token_id'] for i in p.get('include') or [] if 'service_token' in i), '-')) for p in d['result'].get('policies') or [] if p.get('name')=='$PG_TAG:$name')")
+  done
+  # A service token made just before a failed policy/app step has nothing pointing at it.
+  r="$(cf_api --soft GET "/accounts/$CF_ACCOUNT/access/service_tokens?name=$PG_TAG:$name")" || return 0
+  for st in $(json_get "$r" "'\n'.join(t['id'] for t in d['result'] or [] if t.get('name')=='$PG_TAG:$name')"); do
+    cf_api --soft DELETE "/accounts/$CF_ACCOUNT/access/service_tokens/$st" >/dev/null || true
+  done
+}
+
 # cf_probe FQDN -> HTTP status of https://FQDN/ without credentials. Resolves through
 # Cloudflare DoH so a negative answer cached by the local resolver (the zone's SOA
 # allows up to 30 min) doesn't hide a record we just created.
@@ -630,7 +719,7 @@ cf_probe() {
 }
 
 cf_expose() {
-  local name="$1" port="$2" auth="$3" fqdn c key="" code i
+  local name="$1" port="$2" auth="$3" allow="${4:-}" fqdn c key="" code i
   cf_load
   fqdn="$name.$CF_ZONE"
   c="$(cf_dns_comment "$fqdn")"
@@ -638,10 +727,12 @@ cf_expose() {
   cf_ensure_tunnel
 
   info "Creating https://$fqdn -> 127.0.0.1:$port (Cloudflare)"
-  trap 'warn "Rolling back $fqdn"; cf_waf_del "'"$name"'" || true; r=$(cf_api --soft GET "/zones/$CF_ZONE_ID/dns_records?name='"$fqdn"'") && id=$(json_get "$r" "d[\"result\"][0][\"id\"] if d[\"result\"] else \"\"") && [[ -n "$id" ]] && cf_api --soft DELETE "/zones/$CF_ZONE_ID/dns_records/$id" >/dev/null; cf_ingress del "'"$fqdn"'" || true' EXIT
+  trap 'warn "Rolling back '"$fqdn"'"; cf_waf_del "'"$name"'" || true; cf_access_del "'"$name"'" "'"$fqdn"'" || true; r=$(cf_api --soft GET "/zones/$CF_ZONE_ID/dns_records?name='"$fqdn"'") && id=$(json_get "$r" "d[\"result\"][0][\"id\"] if d[\"result\"] else \"\"") && [[ -n "$id" ]] && cf_api --soft DELETE "/zones/$CF_ZONE_ID/dns_records/$id" >/dev/null; cf_ingress del "'"$fqdn"'" || true' EXIT
   if [[ "$auth" == bearer ]]; then
     key="sk-omr-$(python3 -c 'import secrets; print(secrets.token_hex(24))')"   # lowercase: the rule compares lower()-ed headers
     cf_waf_add "$name" "$fqdn" "$key"
+  elif [[ "$auth" == login || "$auth" == token ]]; then
+    cf_access_add "$name" "$fqdn" "$auth" "$allow"   # before DNS: never reachable without it
   fi
   cf_ingress add "$fqdn" "$port"
   cf_api POST "/zones/$CF_ZONE_ID/dns_records" \
@@ -656,6 +747,14 @@ cf_expose() {
       sleep 3
     done
     [[ "$code" == 403 ]] || die "The URL still answers without the key (HTTP $code) — not publishing it."
+  elif [[ "$auth" == login || "$auth" == token ]]; then
+    info "Waiting for Cloudflare Access to guard it (up to 2 min)…"
+    for i in $(seq 1 40); do
+      code="$(cf_probe "$fqdn")"
+      [[ "$code" =~ ^(302|401|403)$ ]] && break
+      sleep 3
+    done
+    [[ "$code" =~ ^(302|401|403)$ ]] || die "The URL answers without signing in (HTTP $code) — not publishing it."
   fi
   trap - EXIT
 
@@ -663,6 +762,9 @@ cf_expose() {
   echo "  If a device looked this name up before it existed, its DNS cache may say 'not found' for up to 30 min."
   case "$auth" in
     none)   warn "Anyone on the internet can open it." ;;
+    login)  echo "  Opens a Cloudflare Access login page. Allowed: $allow (email code)" ;;
+    token)
+      json_get "$CF_SERVICE_TOKEN" "'  Client ID: '+d['result']['client_id']+'   Client secret: '+d['result']['client_secret']+'   (shown once — save it)\n  curl -H \"CF-Access-Client-Id: '+d['result']['client_id']+'\" -H \"CF-Access-Client-Secret: '+d['result']['client_secret']+'\" https://$fqdn/'" ;;
     bearer)
       echo "  Key: $key   (shown once — save it)"
       echo "  curl -H 'Authorization: Bearer $key' https://$fqdn/"
@@ -678,6 +780,7 @@ cf_unexpose() {
   [[ -z "$id" ]] || cf_api DELETE "/zones/$CF_ZONE_ID/dns_records/$id" >/dev/null
   cf_ingress del "$fqdn"
   cf_waf_del "$name"
+  cf_access_del "$name" "$fqdn"
   info "Removed https://$fqdn (Cloudflare)"
 }
 
@@ -880,14 +983,16 @@ omarchy-remote $VERSION — reach local services on your Omarchy machine from an
 Usage: omarchy-remote <command>
 
   expose <name> <port>       private URL via Tailscale (default): https://<machine>.ts.net:<port>
+  expose <name> <port> --auth login|token|bearer|none [--allow a@x.com,b@y.com] [--via cloudflare]
+                             public URL https://<name>.<your-zone> via Cloudflare (login/token use
+                             Cloudflare Access; bearer = API key checked at Cloudflare's edge)
   expose <name> <port> --auth login|token|password|none [--allow a@x.com,b@y.com] [--via pangolin]
-                             public URL https://<name>.<your-domain> behind the chosen login
-  expose <name> <port> --auth bearer|none [--via cloudflare]
-                             public URL via Cloudflare; bearer = API key checked at Cloudflare's edge
+                             public URL https://<name>.<your-domain> via Pangolin
   unexpose <name>
   list [--json]              show exposed services (--json: for scripts and the Omarchy plugin)
   config set public pangolin|cloudflare
-                             provider used when --auth is given without --via (default: pangolin)
+                             provider used when --auth is given without --via (default:
+                             cloudflare, or pangolin if only Pangolin is set up)
   setup                      install wayvnc + noVNC and start the desktop services
   status                     show desktop service and publishing status
   tailscale on|off           publish privately to your tailnet (HTTPS)
