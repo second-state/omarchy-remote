@@ -5,24 +5,25 @@ model API, a web app you are building, or the desktop itself — with one comman
 of your choice. No containers, no Kubernetes, no public IP, no open ports.
 
 ```
-                         ┌─► 127.0.0.1:11434  (e.g. a model API)
-browser / app ─► Pangolin ┼─► 127.0.0.1:3000   (e.g. your web app)
-   (public + login)       └─► 127.0.0.1:6080   (the desktop, via noVNC)
-your own devices ─► Tailscale (private, peer-to-peer)
+your own devices ── Tailscale (private, peer-to-peer) ──┐    ┌─► 127.0.0.1:11434  (e.g. a model API)
+                                                        ├────┼─► 127.0.0.1:3000   (e.g. your web app)
+anyone, any app ─── Cloudflare or Pangolin (public) ────┘    └─► 127.0.0.1:6080   (the desktop, via noVNC)
 ```
 
 ```bash
 omarchy-remote expose app 3000
 # -> https://<machine>.<tailnet>.ts.net:3000 (default: Tailscale, only your own devices)
 omarchy-remote expose app 3000 --auth login --allow friend@example.com
-# -> https://app.home.example.com (public; browser login, your friend gets an email code)
+# -> https://app.example.com      (public; browser login, your friend gets an email code)
 omarchy-remote expose ai 11434 --auth bearer
 # -> https://ai.example.com       (public; OpenAI-style clients send "Authorization: Bearer <key>")
 ```
 
 Private URLs go through **Tailscale** (free for personal use, no domain needed). Public URLs
-go through **Pangolin** (browser login, tokens, passwords) or **Cloudflare** (API keys checked
-at Cloudflare's edge — works with OpenAI-compatible clients and SDKs, including streaming).
+go through the provider you pick: **Cloudflare** (browser login and service tokens via
+Cloudflare Access, plus API keys checked at Cloudflare's edge — works with OpenAI-compatible
+clients and SDKs, including streaming) or **Pangolin** (browser login, tokens, passwords).
+Set up one or both.
 
 How your service runs (a binary, a script, a container) is up to you — `expose` only needs a
 port on `127.0.0.1`. The tool also ships a browser remote desktop as a ready-made service.
@@ -76,7 +77,7 @@ Optional, so `expose` doesn't need sudo: `sudo tailscale set --operator=$USER`.
    ```
    The key is stored in `~/.config/omarchy-remote/pangolin.key` (mode 600).
 
-## One-time setup: Cloudflare (public URLs, API keys)
+## One-time setup: Cloudflare (public URLs)
 
 Needs a domain on Cloudflare (the free plan is enough). Services get `https://<name>.<domain>`
 (one level below the domain, so Cloudflare's free certificate covers them).
@@ -84,6 +85,11 @@ Needs a domain on Cloudflare (the free plan is enough). Services get `https://<n
 1. Create an API token: My Profile → API Tokens → Create Token → Custom token, with
    **Account: Cloudflare Tunnel (Edit)** and **Zone: DNS (Edit), Zone WAF (Edit), Zone (Read)**,
    limited to your account and that zone.
+   For `--auth login` / `--auth token`, also enable **Zero Trust** on the account (the free
+   plan covers 50 users) and add **Account: Access: Apps and Policies (Edit), Access: Service
+   Tokens (Edit), Access: Organizations, Identity Providers, and Groups (Edit)**. The first
+   `login` service turns on the email one-time-code login method for your Zero Trust
+   organization if it isn't on yet.
 2. On the Omarchy machine:
    ```bash
    omarchy-remote cloudflare login   # asks for the token (hidden) and the domain
@@ -103,25 +109,28 @@ omarchy-remote unexpose <name>
 ```
 
 Without `--auth` the URL is private (Tailscale). With `--auth` it is public, through the
-provider in `--via pangolin|cloudflare`, or the default set with
-`omarchy-remote config set public <provider>` (initially `pangolin`; `--auth bearer` always
-uses Cloudflare).
+provider in `--via cloudflare|pangolin`, or the default set with
+`omarchy-remote config set public <provider>`. Unset, the default is Cloudflare (Pangolin if
+only Pangolin is set up on this machine); `--auth bearer` always uses Cloudflare and
+`--auth password` always uses Pangolin.
 
 | `--auth` | For | How to get in | Share with someone | Providers |
 |---|---|---|---|---|
-| `login` | people, in a browser | login page: members of your Pangolin org sign in with their account; others get an email code | `--allow a@x.com,b@y.com` | Pangolin |
-| `token` | programs / APIs | headers `P-Access-Token-Id` + `P-Access-Token`, or `?p_token=<id>.<token>` | give them the token | Pangolin |
+| `login` | people, in a browser | login page with an email code. Pangolin: members of your Pangolin org can also sign in with their account | `--allow a@x.com,b@y.com` (required on Cloudflare) | Cloudflare, Pangolin |
+| `token` | programs / APIs | Cloudflare: headers `CF-Access-Client-Id` + `CF-Access-Client-Secret`. Pangolin: headers `P-Access-Token-Id` + `P-Access-Token`, or `?p_token=<id>.<token>` | give them the token | Cloudflare, Pangolin |
 | `password` | programs and browsers | HTTP Basic: `curl -u user:pass …` or `https://user:pass@host/` | give them the password | Pangolin |
 | `bearer` | programs, OpenAI-style clients | `Authorization: Bearer <key>` (e.g. `base_url=https://ai.example.com/v1`, `api_key=<key>`) | give them the key | Cloudflare |
-| `none` | everyone | no login — requires `--yes-public` | share the URL | Pangolin, Cloudflare |
+| `none` | everyone | no login — requires `--yes-public` | share the URL | Cloudflare, Pangolin |
 
 Passwords, tokens and keys are generated for you and **printed once** — save them.
 
 A new Pangolin address needs about 30 seconds for its certificate (404 / connection errors until
-then). `expose --auth bearer` waits until Cloudflare refuses keyless requests before it reports
-success (usually 10–30 s). After `unexpose`, an address may keep answering for a few seconds.
+then). On Cloudflare, `expose` with `bearer`, `login` or `token` waits until requests without
+credentials are refused before it reports success (usually 10–30 s). After `unexpose`, an address may keep answering for a few seconds.
 
-> `bearer` uses one Cloudflare WAF custom rule per service; the free plan allows 5 custom rules
+> On Cloudflare, `login` and `token` create one Access application (plus a policy, and for
+> `token` a service token) per service, all named `omarchy-remote:<name>`; `unexpose` removes
+> them. `bearer` uses one Cloudflare WAF custom rule per service; the free plan allows 5 custom rules
 > per domain (shared with any rules you made yourself). Anyone who can open your Cloudflare
 > dashboard can read the keys in those rules.
 
@@ -148,8 +157,8 @@ Shows what this machine exposes, with copy/open buttons for each URL
 
 ```
 omarchy-remote expose <name> <port>   private URL via Tailscale
+omarchy-remote expose <name> <port> --auth login|token|bearer|none [--allow emails] [--via cloudflare]
 omarchy-remote expose <name> <port> --auth login|token|password|none [--allow emails] [--user name] [--via pangolin]
-omarchy-remote expose <name> <port> --auth bearer|none [--via cloudflare]
 omarchy-remote unexpose <name>
 omarchy-remote config set public pangolin|cloudflare
 omarchy-remote list                   show exposed services

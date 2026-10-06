@@ -3,22 +3,21 @@
 在任何地方访问你 [Omarchy](https://omarchy.org) 电脑上的服务：本地模型的 API、你正在开发的网页，或者桌面本身。一条命令暴露出去，再选一种登录方式。不需要容器、不需要 Kubernetes、不需要公网 IP，也不用开端口。
 
 ```
-                         ┌─► 127.0.0.1:11434  （比如模型 API）
-浏览器 / 程序 ─► Pangolin ┼─► 127.0.0.1:3000   （比如你的网页）
-   （公网 + 登录）        └─► 127.0.0.1:6080   （桌面，通过 noVNC）
-你自己的设备 ─► Tailscale（私有，点对点直连）
+你自己的设备 ── Tailscale（私有，点对点直连）───┐    ┌─► 127.0.0.1:11434 （比如模型 API）
+                                                ├────┼─► 127.0.0.1:3000  （比如你的网页）
+任何人、任何程序 ── Cloudflare 或 Pangolin（公网）┘    └─► 127.0.0.1:6080  （桌面，通过 noVNC）
 ```
 
 ```bash
 omarchy-remote expose app 3000
 # -> https://<机器名>.<tailnet>.ts.net:3000（默认走 Tailscale，只有你自己的设备能访问）
 omarchy-remote expose app 3000 --auth login --allow friend@example.com
-# -> https://app.home.example.com（公网；浏览器登录，朋友用邮箱验证码进入）
+# -> https://app.example.com     （公网；浏览器登录，朋友用邮箱验证码进入）
 omarchy-remote expose ai 11434 --auth bearer
 # -> https://ai.example.com      （公网；OpenAI 风格的客户端用 "Authorization: Bearer <key>" 调用）
 ```
 
-私有地址走 **Tailscale**（个人使用免费，不需要域名）。公网地址走 **Pangolin**（浏览器登录、访问令牌、密码），或者走 **Cloudflare**（在 Cloudflare 边缘校验 API key，兼容 OpenAI 风格的客户端和 SDK，包括流式输出）。
+私有地址走 **Tailscale**（个人使用免费，不需要域名）。公网地址走你选的提供方：**Cloudflare**（通过 Cloudflare Access 做浏览器登录和服务令牌，还能在 Cloudflare 边缘校验 API key，兼容 OpenAI 风格的客户端和 SDK，包括流式输出），或者 **Pangolin**（浏览器登录、访问令牌、密码）。两个都配或只配一个都行。
 
 服务怎么跑（二进制、脚本还是容器）由你决定，`expose` 只要求它在 `127.0.0.1` 上监听一个端口。工具还自带一个浏览器远程桌面，作为现成的服务。
 
@@ -56,11 +55,12 @@ curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/in
    ```
    密钥保存在 `~/.config/omarchy-remote/pangolin.key`（权限 600）。
 
-## 一次性配置：Cloudflare（公网地址、API key）
+## 一次性配置：Cloudflare（公网地址）
 
 需要一个托管在 Cloudflare 上的域名，免费版就够。服务地址是 `https://<名字>.<域名>`：只能在域名下一层，这样 Cloudflare 免费证书才能覆盖。
 
 1. 创建 API 令牌：我的个人资料 → API 令牌 → 创建令牌 → 自定义令牌。权限选 **帐户：Cloudflare Tunnel（编辑）**，以及 **区域：DNS（编辑）、区域 WAF（编辑）、区域（读取）**，作用范围限定为你的帐户和这个域名。
+   要用 `--auth login` 或 `--auth token`，还需要在这个帐户上开通 **Zero Trust**（免费版支持 50 个用户），并给令牌加上 **帐户：Access: Apps and Policies（编辑）、Access: Service Tokens（编辑）、Access: Organizations, Identity Providers, and Groups（编辑）**。第一个 `login` 服务会为你的 Zero Trust 组织开启邮箱验证码登录（如果还没开）。
 2. 在 Omarchy 机器上执行：
    ```bash
    omarchy-remote cloudflare login   # 输入令牌（不会显示）并选择域名
@@ -78,21 +78,21 @@ omarchy-remote list
 omarchy-remote unexpose <名字>
 ```
 
-不带 `--auth` 时是私有地址（Tailscale）。带了 `--auth` 就是公网地址，走 `--via pangolin|cloudflare` 指定的提供方；不写 `--via` 时用 `omarchy-remote config set public <提供方>` 设置的默认值（初始为 `pangolin`；`--auth bearer` 总是走 Cloudflare）。
+不带 `--auth` 时是私有地址（Tailscale）。带了 `--auth` 就是公网地址，走 `--via cloudflare|pangolin` 指定的提供方；不写 `--via` 时用 `omarchy-remote config set public <提供方>` 设置的默认值。没设置时默认走 Cloudflare（如果这台机器只配了 Pangolin，就走 Pangolin）；`--auth bearer` 总是走 Cloudflare，`--auth password` 总是走 Pangolin。
 
 | `--auth` | 给谁用 | 怎么进入 | 分享给别人 | 提供方 |
 |---|---|---|---|---|
-| `login` | 人，用浏览器 | 登录页：Pangolin 组织成员用账号直接登录，其他人用邮箱验证码 | `--allow a@x.com,b@y.com` | Pangolin |
-| `token` | 程序 / API | 请求头 `P-Access-Token-Id` + `P-Access-Token`，或 `?p_token=<id>.<token>` | 把令牌发给对方 | Pangolin |
+| `login` | 人，用浏览器 | 登录页，用邮箱验证码进入。Pangolin 上，组织成员也可以用账号直接登录 | `--allow a@x.com,b@y.com`（Cloudflare 上必填） | Cloudflare、Pangolin |
+| `token` | 程序 / API | Cloudflare：请求头 `CF-Access-Client-Id` + `CF-Access-Client-Secret`。Pangolin：请求头 `P-Access-Token-Id` + `P-Access-Token`，或 `?p_token=<id>.<token>` | 把令牌发给对方 | Cloudflare、Pangolin |
 | `password` | 程序和浏览器都行 | HTTP Basic：`curl -u 用户:密码 …` 或 `https://用户:密码@域名/` | 把密码发给对方 | Pangolin |
 | `bearer` | 程序、OpenAI 风格的客户端 | `Authorization: Bearer <key>`（比如 `base_url=https://ai.example.com/v1`，`api_key=<key>`） | 把 key 发给对方 | Cloudflare |
-| `none` | 所有人 | 不需要登录，必须加 `--yes-public` 确认 | 直接发地址 | Pangolin、Cloudflare |
+| `none` | 所有人 | 不需要登录，必须加 `--yes-public` 确认 | 直接发地址 | Cloudflare、Pangolin |
 
 密码、令牌和 key 都由工具自动生成，**只显示一次**，请自己保存好。
 
-Pangolin 的新地址需要大约 30 秒签发证书，在此之前出现 404 或连不上是正常的。`expose --auth bearer` 会等到 Cloudflare 确实拒绝不带 key 的请求后才报告成功（通常 10～30 秒）。`unexpose` 之后，地址可能还会响应几秒。
+Pangolin 的新地址需要大约 30 秒签发证书，在此之前出现 404 或连不上是正常的。在 Cloudflare 上，`bearer`、`login`、`token` 三种方式的 `expose` 都会等到不带凭据的请求确实被拒绝后才报告成功（通常 10～30 秒）。`unexpose` 之后，地址可能还会响应几秒。
 
-> 每个 `bearer` 服务占用一条 Cloudflare WAF 自定义规则。免费版每个域名最多 5 条，跟你自己建的规则共用。能打开你 Cloudflare 后台的人，都能看到这些规则里的 key。
+> 在 Cloudflare 上，每个 `login` 或 `token` 服务会建一个 Access 应用和一条策略（`token` 还会建一个服务令牌），名字都是 `omarchy-remote:<名字>`，`unexpose` 时一并删除。每个 `bearer` 服务占用一条 Cloudflare WAF 自定义规则。免费版每个域名最多 5 条，跟你自己建的规则共用。能打开你 Cloudflare 后台的人，都能看到这些规则里的 key。
 
 ### 远程桌面
 
@@ -116,8 +116,8 @@ omarchy plugin add https://github.com/second-state/omarchy-remote-plugin --enabl
 
 ```
 omarchy-remote expose <名字> <端口>   通过 Tailscale 生成私有地址
+omarchy-remote expose <名字> <端口> --auth login|token|bearer|none [--allow 邮箱] [--via cloudflare]
 omarchy-remote expose <名字> <端口> --auth login|token|password|none [--allow 邮箱] [--user 用户名] [--via pangolin]
-omarchy-remote expose <名字> <端口> --auth bearer|none [--via cloudflare]
 omarchy-remote unexpose <名字>
 omarchy-remote config set public pangolin|cloudflare
 omarchy-remote list                   查看已暴露的服务
