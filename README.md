@@ -135,6 +135,15 @@ omarchy-remote expose desktop 6080 --auth login --allow you@example.com
 Opening the URL connects automatically and scales the desktop to your window.
 No monitor attached? The desktop service tries to create a headless (virtual) output.
 
+## Bar widget (Omarchy plugin)
+
+```bash
+omarchy plugin add https://github.com/second-state/omarchy-remote-plugin --enable
+```
+
+Shows what this machine exposes, with copy/open buttons for each URL
+([details](https://github.com/second-state/omarchy-remote-plugin)).
+
 ## Commands
 
 ```
@@ -180,7 +189,6 @@ Settings can be overridden in `~/.config/omarchy-remote/config` (ports, noVNC qu
 
 ## Roadmap
 
-- Omarchy Quattro plugin: bar widget + panel (see [`plugin/`](plugin/))
 - Dedicated 1080p virtual output for remote sessions
 - Low-latency streaming via Sunshine + Moonlight
 

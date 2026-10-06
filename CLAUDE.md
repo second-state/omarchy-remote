@@ -15,7 +15,7 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 ## Layout
 - `bin/omarchy-remote` — the CLI (bash). All logic lives here.
 - `install.sh` — one-line installer: clones to `~/.local/share/omarchy-remote/src`, links the CLI into `~/.local/bin`, runs `setup`.
-- `plugin/` — planned Quattro plugin (bar-widget + panel, QML). It must only call the CLI, never need privileges.
+- `plugin/` — pointer only. The Omarchy shell plugin lives in github.com/second-state/omarchy-remote-plugin (manifest must be at repo root for `omarchy plugin add`). It only runs `omarchy-remote list --json`; keep that JSON backward compatible.
 - `README.md` / `README.zh-CN.md` — user docs; keep both in sync.
 
 ## Conventions
@@ -60,7 +60,7 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 
 ## Roadmap
 1. ~~Verify `setup` end-to-end on the test machine~~ — done 2026-10-02 (legacy units migrated, desktop reachable via Tailscale and Pangolin).
-2. Survive reboot: auto-login / disk unlock so remote access comes back unattended.
+2. ~~Survive reboot unattended~~ — deferred 2026-10-05 by decision. SDDM autologin already works; what blocks is the LUKS passphrase at boot (plus no power-on-after-AC-loss in BIOS). The test machine sits in an office, so downtime after a power cut is accepted. If revisited: TPM2 unlock needs switching Omarchy's `encrypt` hook to `sd-encrypt` + `rd.luks` cmdline (Omarchy updates may revert it); keep the passphrase keyslot.
 3. Dedicated 1080p headless output for remote sessions.
-4. Quattro plugin (status + copy URL + toggle).
+4. ~~Omarchy plugin~~ — 0.1.0 published 2026-10-05 (list + copy/open URLs). Testing over SSH: take OMARCHY_PATH etc. from the running quickshell's /proc/<pid>/environ; `omarchy-restart-shell` refuses while the session is locked; the lock screen hides the bar, and grim hangs while DPMS is off.
 5. Sunshine + Moonlight low-latency mode; reverse-proxy other LAN devices.

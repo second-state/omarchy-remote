@@ -1,7 +1,14 @@
-# Omarchy plugin (planned)
+# Omarchy shell plugin
 
-A Quattro plugin (`bar-widget` + `panel`) that shows remote-access status and the
-current URL, with buttons to copy the link and toggle Tailscale publishing.
+The bar icon + panel for omarchy-remote lives in its own repository, because
+`omarchy plugin add` needs `manifest.json` at the repository root:
 
-It will only call the `omarchy-remote` CLI — all privileged setup stays in the CLI,
-so the plugin itself needs no extra permissions.
+**https://github.com/second-state/omarchy-remote-plugin**
+
+```bash
+omarchy plugin add https://github.com/second-state/omarchy-remote-plugin --enable
+```
+
+It reads `omarchy-remote list --json` (defined in `bin/omarchy-remote`). Keep that JSON
+shape backward compatible: `services[]` with `name`, `provider`, `auth`, `url`, `target`;
+`desktop.vnc` / `desktop.web`; `errors[]`; `version`.
