@@ -73,12 +73,12 @@ curl -fsSL https://raw.githubusercontent.com/second-state/omarchy-remote/main/in
 
 ```bash
 omarchy-remote expose <名字> <端口>                 # 私有：https://<机器名>.ts.net:<端口>
-omarchy-remote expose <名字> <端口> --auth <方式>   # 公网：https://<名字>.<你的域名>
+omarchy-remote expose <名字> <端口> --auth <方式> [--via cloudflare|pangolin]   # 公网：https://<名字>.<你的域名>
 omarchy-remote list
 omarchy-remote unexpose <名字>
 ```
 
-不带 `--auth` 时是私有地址（Tailscale）。带了 `--auth` 就是公网地址，走 `--via cloudflare|pangolin` 指定的提供方；不写 `--via` 时用 `omarchy-remote config set public <提供方>` 设置的默认值。没设置时默认走 Cloudflare（如果这台机器只配了 Pangolin，就走 Pangolin）；`--auth bearer` 总是走 Cloudflare，`--auth password` 总是走 Pangolin。
+不带 `--auth` 时是私有地址（Tailscale）。带了 `--auth` 就是公网地址，走 `--via cloudflare|pangolin` 指定的提供方；不写 `--via` 时用 `omarchy-remote config set public <提供方>` 设置的默认值。没设置时默认走 Cloudflare（如果这台机器只配了 Pangolin，就走 Pangolin；两个都配了时，`expose` 会提示它选了 Cloudflare）；`--auth bearer` 总是走 Cloudflare，`--auth password` 总是走 Pangolin。
 
 | `--auth` | 给谁用 | 怎么进入 | 分享给别人 | 提供方 |
 |---|---|---|---|---|

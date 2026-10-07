@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.6.0"
+VERSION="0.6.1"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -341,7 +341,10 @@ cmd_expose() {
     elif [[ -n "$PUBLIC_VIA" ]]; then via="$PUBLIC_VIA"
     # Not configured: Cloudflare, unless only Pangolin is set up on this machine.
     elif [[ -r "$PG_ENV_FILE" && ! -r "$CF_ENV_FILE" ]]; then via=pangolin
-    else via=cloudflare; fi
+    else
+      via=cloudflare
+      [[ -r "$PG_ENV_FILE" ]] && info "Using Cloudflare (both providers are set up; pick one with --via pangolin|cloudflare or: omarchy-remote config set public <provider>)"
+    fi
   fi
   case "$via" in
     tailscale)
