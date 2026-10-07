@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.6.1"
+VERSION="0.7.0"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -26,6 +26,8 @@ PANGOLIN_API="https://api.pangolin.net/v1"
 PUBLIC_VIA=""         # provider used when --auth is given without --via ("" = auto, see cmd_expose)
 NOVNC_QUALITY=6        # 0-9, lower = smaller/faster
 NOVNC_COMPRESSION=2    # 0-9, higher = more CPU, less bandwidth
+GUEST=0                # 1 = this account was made by `user add` (headless desktop, set in its config)
+GUEST_MODE="1920x1080@60"  # resolution of a user's headless desktop
 # shellcheck source=/dev/null
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
@@ -40,6 +42,12 @@ CF_TUNNEL_TOKEN_FILE="$PG_DIR/cloudflare-tunnel.token"  # cloudflared run token,
 CF_UNIT="omarchy-remote-tunnel.service"
 VNC_UNIT="omarchy-remote-vnc.service"
 WEB_UNIT="omarchy-remote-web.service"
+SESSION_UNIT="omarchy-remote-session.service"   # a user's headless Hyprland (user add)
+USERS_DIR="/etc/omarchy-remote"
+USERS_FILE="$USERS_DIR/users"                    # "<name> <n>" per user; desktop on 5900+n / 6080+n
+FW_FILE="$USERS_DIR/firewall.nft"
+FW_UNIT="omarchy-remote-firewall.service"
+GUEST_OUTPUT="REMOTE"                            # headless output a user's desktop runs on
 
 # ---- helpers ----------------------------------------------------------------
 c_ok=$'\e[32m'; c_warn=$'\e[33m'; c_err=$'\e[31m'; c_dim=$'\e[2m'; c_off=$'\e[0m'
@@ -74,6 +82,7 @@ ts_url() {
 # ---- commands ---------------------------------------------------------------
 cmd_setup() {
   require_user
+  ((!GUEST)) || die "This account's desktop is managed by the machine owner (omarchy-remote user add)."
   have pacman || die "This tool targets Omarchy / Arch Linux (pacman not found)."
   have hyprctl || warn "hyprctl not found — is this an Omarchy (Hyprland) machine?"
 
@@ -120,6 +129,7 @@ EOF
 write_units() {
   mkdir -p "$UNIT_DIR"
   local self; self="$(readlink -f "$0")"
+  if ((GUEST)); then write_guest_units "$self"; return; fi
   cat > "$UNIT_DIR/$VNC_UNIT" <<EOF
 [Unit]
 Description=omarchy-remote: wayvnc (Hyprland desktop on 127.0.0.1:$VNC_PORT)
@@ -900,6 +910,340 @@ print(json.dumps(out))
 PY
 }
 
+# ---- users: a separate desktop per person -----------------------------------
+# `user add NAME` gives someone their own Linux account and Omarchy desktop. It runs
+# headless (the physical screen stays with the owner's session) on 5900+n / 6080+n,
+# from units in NAME's own systemd --user (lingering, so it runs without a login).
+# The firewall table keeps NAME's processes away from everyone else's local services
+# and from the tailnet, which this machine reaches with the owner's identity.
+
+cmd_user() {
+  local sub="${1:-list}"; shift || true
+  ((!GUEST)) || die "Users are managed by the machine owner."
+  case "$sub" in
+    add)       user_add "$@" ;;
+    remove|rm) user_remove "$@" ;;
+    list|ls)   user_list ;;
+    *) die "usage: omarchy-remote user add <name> [--allow a@x.com] [--via pangolin|cloudflare] | remove <name> | list" ;;
+  esac
+}
+
+user_n() { [[ -f "$USERS_FILE" ]] && awk -v u="$1" '$1 == u { print $2; exit }' "$USERS_FILE"; return 0; }
+
+user_free_n() {
+  local n
+  for ((n = 1; n < 100; n++)); do
+    if [[ -f "$USERS_FILE" ]] && awk -v n="$n" '$2 == n { f=1 } END { exit !f }' "$USERS_FILE"; then continue; fi
+    ss -Hltn "( sport = :$((VNC_PORT + n)) or sport = :$((WEB_PORT + n)) )" | grep -q . && continue
+    echo "$n"; return
+  done
+  die "No free ports for another desktop."
+}
+
+user_registry_set() {   # user_registry_set NAME [N] — no N removes NAME
+  local tmp; tmp="$(mktemp)"
+  if [[ -f "$USERS_FILE" ]]; then awk -v u="$1" '$1 != u' "$USERS_FILE" > "$tmp"; fi
+  if [[ -n "${2:-}" ]]; then echo "$1 $2" >> "$tmp"; fi
+  sudo install -D -m 644 "$tmp" "$USERS_FILE"
+  rm -f "$tmp"
+}
+
+as_user() {   # as_user NAME CMD...: run CMD as NAME, talking to NAME's systemd --user
+  local uid; uid="$(id -u "$1")"
+  (cd / && sudo -u "$1" -H env XDG_RUNTIME_DIR="/run/user/$uid" \
+     DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "${@:2}")
+}
+
+# user_exposed NAME PORT: is NAME already exposed and pointing at PORT?
+user_exposed() {
+  list_json | python3 -c 'import json, sys
+n, p = sys.argv[1:3]
+sys.exit(0 if any(s["name"] == n and s["target"].endswith(":" + p) for s in json.load(sys.stdin)["services"]) else 1)' "$1" "$2"
+}
+
+user_add() {
+  require_user
+  local name="" allow="" via=""
+  while (($#)); do
+    case "$1" in
+      --allow)   allow="${2:-}"; shift 2 ;;
+      --allow=*) allow="${1#*=}"; shift ;;
+      --via)     via="${2:-}"; shift 2 ;;
+      --via=*)   via="${1#*=}"; shift ;;
+      -*)        die "Unknown option: $1" ;;
+      *)         [[ -z "$name" ]] || die "Unexpected argument: $1"; name="$1"; shift ;;
+    esac
+  done
+  [[ -n "$name" ]] || die "usage: omarchy-remote user add <name> [--allow a@x.com,b@y.com] [--via pangolin|cloudflare]"
+  # A Linux account name that also works as a subdomain.
+  [[ "$name" =~ ^[a-z]([a-z0-9-]{0,30}[a-z0-9])?$ ]] || die "Name: lowercase letters, digits and dashes, starting with a letter."
+  [[ "$name" != "$(id -un)" ]] || die "That's you. Your own desktop: omarchy-remote setup"
+  [[ -z "$via" || -n "$allow" ]] || die "--via needs --allow (who may sign in)."
+  have omarchy-provision-user || die "Needs Omarchy 4 or later (omarchy-provision-user not found)."
+  have nft || die "nftables (nft) not found."
+  getent group video >/dev/null || die "No 'video' group on this system."
+  [[ -x "$NOVNC_DIR/utils/novnc_proxy" ]] || die "Set up your own desktop first: omarchy-remote setup"
+
+  local n; n="$(user_n "$name")"
+  [[ -n "$n" ]] || n="$(user_free_n)"
+  local vnc=$((VNC_PORT + n)) web=$((WEB_PORT + n))
+
+  if id "$name" >/dev/null 2>&1; then
+    (($(id -u "$name") >= 1000)) || die "$name is a system account."
+    info "Using the existing account $name"
+  else
+    info "Creating the account $name (no password, no sudo)"
+    sudo useradd -m "$name"
+  fi
+  id -nG "$name" | grep -qw wheel && warn "$name can use sudo (wheel group); the isolation below doesn't hold against that."
+  # No seat: its Hyprland opens the GPU directly, which needs the video group.
+  sudo usermod -aG video "$name"
+  sudo loginctl enable-linger "$name"   # starts its systemd --user now and at every boot
+  local uid; uid="$(id -u "$name")"
+  local i
+  for ((i = 0; i < 30; i++)); do sudo test -S "/run/user/$uid/bus" && break; sleep 1; done
+  sudo test -S "/run/user/$uid/bus" || die "$name's systemd --user didn't start."
+
+  user_registry_set "$name" "$n"
+  firewall_apply   # before anything of theirs listens
+
+  info "Setting up $name's Omarchy (first time takes a minute)…"
+  local out
+  out="$(as_user "$name" env OMARCHY_SETUP_CONTEXT=provision-owner omarchy-provision-user 2>&1)" \
+    || { printf '%s\n' "$out" | tail -20 >&2; die "omarchy-provision-user failed for $name."; }
+
+  # Their own copy of this CLI and noVNC: the owner's home isn't readable to them.
+  # Running `user add` again after an update refreshes both.
+  local home; home="$(getent passwd "$name" | cut -d: -f6)"
+  as_user "$name" mkdir -p "$home/.local/bin" "$home/.local/share/omarchy-remote"
+  sudo install -o "$name" -g "$name" -m 755 "$(readlink -f "$0")" "$home/.local/bin/omarchy-remote"
+  sudo rm -rf "$home/.local/share/omarchy-remote/novnc"
+  sudo cp -a "$NOVNC_DIR" "$home/.local/share/omarchy-remote/novnc"
+  sudo chown -R "$name:$name" "$home/.local/share/omarchy-remote/novnc"
+  as_user "$name" "$home/.local/bin/omarchy-remote" guest-setup "$vnc" "$web"
+
+  for ((i = 0; i < 30; i++)); do ss -Hltn "sport = :$web" | grep -q . && break; sleep 1; done
+  info "$name's desktop: 127.0.0.1:$web"
+
+  if [[ -n "$allow" ]]; then
+    if user_exposed "$name" "$web"; then
+      info "Already exposed (omarchy-remote list)"
+    else
+      local args=(--auth login --allow "$allow"); [[ -n "$via" ]] && args+=(--via "$via")
+      cmd_expose "$name" "$web" "${args[@]}"
+    fi
+  else
+    cat <<EOF
+
+Give them a URL with a login, for example:
+  omarchy-remote expose $name $web --auth login --allow them@example.com
+EOF
+  fi
+}
+
+user_remove() {
+  require_user
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: omarchy-remote user remove <name>"
+  local n; n="$(user_n "$name")"
+  [[ -n "$n" ]] || die "$name wasn't added with omarchy-remote user add."
+  if user_exposed "$name" "$((WEB_PORT + n))"; then cmd_unexpose "$name"; fi
+  if id "$name" >/dev/null 2>&1; then
+    info "Stopping $name's desktop"
+    as_user "$name" systemctl --user disable --now "$SESSION_UNIT" "$VNC_UNIT" "$WEB_UNIT" 2>/dev/null || true
+    sudo loginctl disable-linger "$name"
+  fi
+  user_registry_set "$name"
+  firewall_apply
+  info "Removed $name's remote desktop. The account and its files are kept; delete them with: sudo userdel -r $name"
+}
+
+user_list() {
+  if [[ ! -s "$USERS_FILE" ]]; then
+    echo "No users. Add one: omarchy-remote user add <name> --allow them@example.com"
+    return
+  fi
+  local name n web state
+  while read -r name n; do
+    web=$((WEB_PORT + n))
+    state=stopped; ss -Hltn "sport = :$web" | grep -q . && state=running
+    printf '  %-20s 127.0.0.1:%-6s %s\n' "$name" "$web" "$state"
+  done < "$USERS_FILE"
+  echo "URLs: omarchy-remote list"
+}
+
+# Per user: no tailnet, and new local TCP connections only to sockets inside the
+# user's own cgroup (user-UID.slice) — not the owner's or another user's services.
+# Connections get tagged with the uid on the way out (ct mark), checked on the way in.
+firewall_apply() {
+  local name n uid units="" out="" in=""
+  if [[ -f "$USERS_FILE" ]]; then
+    while read -r name n; do
+      uid="$(id -u "$name" 2>/dev/null)" || continue
+      units+=" user@$uid.service"
+      out+="    # $name
+    meta skuid $uid ip daddr 100.64.0.0/10 reject
+    meta skuid $uid ip6 daddr fd7a:115c:a1e0::/48 reject
+    oif \"lo\" meta l4proto tcp ct state new meta skuid $uid ct mark set $uid
+"
+      in+="    # $name: own services and DNS only
+    iif \"lo\" ct state new ct mark $uid socket cgroupv2 level 2 \"user.slice/user-$uid.slice\" accept
+    iif \"lo\" ct state new ct mark $uid tcp dport 53 accept
+    iif \"lo\" meta l4proto tcp ct state new ct mark $uid reject with tcp reset
+"
+    done < "$USERS_FILE"
+  fi
+  if [[ -z "$units" ]]; then
+    sudo systemctl disable --now "$FW_UNIT" 2>/dev/null || true
+    sudo rm -f "/etc/systemd/system/$FW_UNIT" "$FW_FILE"
+    sudo systemctl daemon-reload
+    return
+  fi
+  sudo tee "$FW_FILE" >/dev/null <<EOF
+# Generated by omarchy-remote user add/remove — edits are overwritten.
+table inet omarchy_remote
+delete table inet omarchy_remote
+table inet omarchy_remote {
+  chain output {
+    type filter hook output priority 0; policy accept;
+$out  }
+  chain input {
+    type filter hook input priority 0; policy accept;
+$in  }
+}
+EOF
+  # After each user's systemd --user: the cgroup paths above must exist when loaded.
+  sudo tee "/etc/systemd/system/$FW_UNIT" >/dev/null <<EOF
+[Unit]
+Description=omarchy-remote: keep remote desktop users to their own services
+Wants=$units
+After=$units
+PartOf=$units
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nft -f $FW_FILE
+ExecStop=/usr/bin/nft delete table inet omarchy_remote
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload
+  sudo systemctl enable --quiet "$FW_UNIT"
+  sudo systemctl restart "$FW_UNIT"
+}
+
+# -- run inside a user's account (from their units / by user add) --
+
+cmd_guest_setup() {
+  require_user
+  [[ "${1:-}" =~ ^[0-9]+$ && "${2:-}" =~ ^[0-9]+$ ]] || die "usage: omarchy-remote guest-setup <vnc-port> <web-port>"
+  GUEST=1; VNC_PORT="$1"; WEB_PORT="$2"
+  mkdir -p "$(dirname "$CONFIG_FILE")"; touch "$CONFIG_FILE"
+  sed -i '/^GUEST=/d; /^VNC_PORT=/d; /^WEB_PORT=/d' "$CONFIG_FILE"
+  printf 'GUEST=1\nVNC_PORT=%s\nWEB_PORT=%s\n' "$VNC_PORT" "$WEB_PORT" >> "$CONFIG_FILE"
+  write_novnc_defaults
+  ln -sf vnc.html "$NOVNC_DIR/index.html"
+  write_units
+  systemctl --user daemon-reload
+  systemctl --user enable --now --quiet "$SESSION_UNIT" "$VNC_UNIT" "$WEB_UNIT"
+  systemctl --user restart "$VNC_UNIT" "$WEB_UNIT"   # pick up new ports/units; the session keeps running
+}
+
+write_guest_units() {
+  local self="$1" hypr; hypr="$(command -v Hyprland || echo /usr/bin/Hyprland)"
+  cat > "$UNIT_DIR/$SESSION_UNIT" <<EOF
+[Unit]
+Description=omarchy-remote: headless Hyprland desktop
+
+[Service]
+# No seat (libseat noop): the GPU is opened directly; the screen stays with the owner.
+Environment=LIBSEAT_BACKEND=noop XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=Hyprland XDG_SESSION_DESKTOP=Hyprland
+ExecStart=$self guest-session $hypr
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "$UNIT_DIR/$VNC_UNIT" <<EOF
+[Unit]
+Description=omarchy-remote: wayvnc (headless desktop on 127.0.0.1:$VNC_PORT)
+Wants=$SESSION_UNIT
+After=$SESSION_UNIT
+
+[Service]
+ExecStart=$self guest-vnc
+# wayvnc exits when Hyprland restarts; come back and attach to the new one.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+  cat > "$UNIT_DIR/$WEB_UNIT" <<EOF
+[Unit]
+Description=omarchy-remote: noVNC web client (127.0.0.1:$WEB_PORT)
+
+[Service]
+ExecStart=$NOVNC_DIR/utils/novnc_proxy --vnc 127.0.0.1:$VNC_PORT --listen 127.0.0.1:$WEB_PORT
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+cmd_guest_session() {
+  # Whoever opens the GPU while nobody holds the screen takes the screen. So wait
+  # for the machine's own graphical session (or login screen) before starting.
+  local s t said=0
+  while :; do
+    s="$(loginctl show-seat seat0 -p ActiveSession --value 2>/dev/null || true)"
+    if [[ -n "$s" ]]; then
+      t="$(loginctl show-session "$s" -p Type --value 2>/dev/null || true)"
+      [[ "$t" == wayland || "$t" == x11 ]] && break
+    fi
+    ((said)) || { echo "Waiting for the graphical session on seat0…"; said=1; }
+    sleep 3
+  done
+  ((said)) && sleep 10   # it just appeared: let its compositor take the screen first
+  exec "$@"
+}
+
+hypr_monitor() {   # hypr_monitor OUTPUT disable|on — Lua configs need eval, .conf ones keyword
+  local lua conf
+  if [[ "$2" == disable ]]; then
+    lua="hl.monitor({ output = \"$1\", disabled = true })"; conf="$1,disable"
+  else
+    lua="hl.monitor({ output = \"$1\", mode = \"$GUEST_MODE\", position = \"0x0\", scale = 1 })"
+    conf="$1,$GUEST_MODE,0x0,1"
+  fi
+  [[ "$(hyprctl eval "$lua" 2>/dev/null)" == ok ]] || hyprctl keyword monitor "$conf" >/dev/null
+}
+
+cmd_guest_vnc() {
+  local i
+  for ((i = 0; i < 60; i++)); do
+    if hypr_env && hyprctl monitors >/dev/null 2>&1; then break; fi
+    unset HYPRLAND_INSTANCE_SIGNATURE; sleep 2
+  done
+  hyprctl monitors >/dev/null 2>&1 || die "Hyprland isn't running."
+  hyprctl monitors all | grep -q "^Monitor $GUEST_OUTPUT " || hyprctl output create headless "$GUEST_OUTPUT" >/dev/null
+  local m
+  for m in $(hyprctl monitors all -j | python3 -c 'import json, sys; print(" ".join(m["name"] for m in json.load(sys.stdin) if m["name"] != sys.argv[1]))' "$GUEST_OUTPUT"); do
+    hypr_monitor "$m" disable
+  done
+  hypr_monitor "$GUEST_OUTPUT" on
+  WAYLAND_DISPLAY="$(hyprctl instances -j | python3 -c 'import json, os, sys
+print(next(i["wl_socket"] for i in json.load(sys.stdin) if i["instance"] == os.environ["HYPRLAND_INSTANCE_SIGNATURE"]))')"
+  export WAYLAND_DISPLAY
+  exec wayvnc -o "$GUEST_OUTPUT" 127.0.0.1 "$VNC_PORT"
+}
+
 cmd_config() {
   [[ "${1:-}" == set && "${2:-}" == public ]] || die "usage: omarchy-remote config set public pangolin|cloudflare"
   case "${3:-}" in pangolin|cloudflare) ;; *) die "usage: omarchy-remote config set public pangolin|cloudflare" ;; esac
@@ -997,6 +1341,10 @@ Usage: omarchy-remote <command>
                              provider used when --auth is given without --via (default:
                              cloudflare, or pangolin if only Pangolin is set up)
   setup                      install wayvnc + noVNC and start the desktop services
+  user add <name> [--allow a@x.com] [--via pangolin|cloudflare]
+                             give someone their own account + Omarchy desktop (headless, isolated
+                             from yours); with --allow, also a URL where they sign in
+  user remove <name> | user list
   status                     show desktop service and publishing status
   tailscale on|off           publish privately to your tailnet (HTTPS)
   pangolin connect           publish via Pangolin (public URL + login)
@@ -1025,7 +1373,11 @@ main() {
     quality)        cmd_quality "$@" ;;
     restart)        cmd_restart "$@" ;;
     uninstall)      cmd_uninstall "$@" ;;
+    user|users)     cmd_user "$@" ;;
     ensure-display) cmd_ensure_display "$@" ;;
+    guest-setup)    cmd_guest_setup "$@" ;;
+    guest-session)  cmd_guest_session "$@" ;;
+    guest-vnc)      cmd_guest_vnc "$@" ;;
     version|-v|--version) echo "$VERSION" ;;
     help|-h|--help) usage ;;
     *) usage; exit 1 ;;
