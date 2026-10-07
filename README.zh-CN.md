@@ -104,6 +104,14 @@ omarchy-remote expose desktop 6080 --auth login --allow you@example.com
 打开地址会自动连接，并按窗口大小缩放桌面。
 没接显示器？桌面服务会尝试创建一块虚拟屏幕。
 
+**浏览器里的快捷键。** 打字和大多数组合键都能传到桌面，但有三个例外：
+
+- **Mac 上，Super 键是右边的 ⌘。** Omarchy 的快捷键都用 Super，但 noVNC 把**左** ⌘ 当成 Alt 发送（左 ⌥ 当成 AltGr）。请改按**右 ⌘**，比如右 ⌘ + Return 打开终端。
+- **浏览器会先截走自己的快捷键。** ⌘W / Ctrl+W 关掉的是浏览器标签页（远程会话也随之断开），而不是远程窗口；⌘T、⌘N、⌘Q 及对应的 Ctrl 组合也到不了桌面；⌘1–9 / Ctrl+1–9 可能切换的是浏览器标签，而不是工作区。
+- **操作系统也会截走一些：** macOS 上的 ⌘Tab、⌘Space；Windows 上的 Win 键、Win+L、Win+D。
+
+遇到被截走的快捷键：打开 noVNC 侧边栏（左边缘的小把手）→ *Show extra keys* → 点亮 **Windows** 键（即 Super），再按另一个键。
+
 ## 状态栏小组件（Omarchy 插件）
 
 ```bash
