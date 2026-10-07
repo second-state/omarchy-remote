@@ -103,7 +103,7 @@ Existing DNS records are never overwritten — pick a name that isn't in use.
 
 ```bash
 omarchy-remote expose <name> <port>                 # private: https://<machine>.ts.net:<port>
-omarchy-remote expose <name> <port> --auth <mode>   # public:  https://<name>.<your-domain>
+omarchy-remote expose <name> <port> --auth <mode> [--via cloudflare|pangolin]   # public:  https://<name>.<your-domain>
 omarchy-remote list
 omarchy-remote unexpose <name>
 ```
@@ -111,8 +111,8 @@ omarchy-remote unexpose <name>
 Without `--auth` the URL is private (Tailscale). With `--auth` it is public, through the
 provider in `--via cloudflare|pangolin`, or the default set with
 `omarchy-remote config set public <provider>`. Unset, the default is Cloudflare (Pangolin if
-only Pangolin is set up on this machine); `--auth bearer` always uses Cloudflare and
-`--auth password` always uses Pangolin.
+only Pangolin is set up on this machine; with both set up, `expose` says it picked Cloudflare);
+`--auth bearer` always uses Cloudflare and `--auth password` always uses Pangolin.
 
 | `--auth` | For | How to get in | Share with someone | Providers |
 |---|---|---|---|---|
