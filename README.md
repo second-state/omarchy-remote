@@ -144,6 +144,20 @@ omarchy-remote expose desktop 6080 --auth login --allow you@example.com
 Opening the URL connects automatically and scales the desktop to your window.
 No monitor attached? The desktop service tries to create a headless (virtual) output.
 
+**Keyboard shortcuts in the browser.** Typing and most key combinations reach the desktop, with
+three catches:
+
+- **On a Mac, Super is the right ⌘.** Omarchy's shortcuts use Super, but noVNC sends the
+  *left* ⌘ as Alt (and the left ⌥ as AltGr). Hold the **right ⌘** instead, e.g. right ⌘ + Return
+  for a terminal.
+- **The browser keeps its own shortcuts.** ⌘W / Ctrl+W closes the browser tab (and your session),
+  not the remote window; ⌘T, ⌘N, ⌘Q and their Ctrl versions never reach the desktop either, and
+  ⌘1–9 / Ctrl+1–9 may switch browser tabs instead of workspaces.
+- **Your OS keeps some too:** ⌘Tab and ⌘Space on macOS; the Windows key, Win+L and Win+D on Windows.
+
+For a shortcut that gets intercepted, open the noVNC side panel (the small handle on the left
+edge) → *Show extra keys* → toggle the **Windows** key (= Super), then press the other key.
+
 ## Bar widget (Omarchy plugin)
 
 ```bash
