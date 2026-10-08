@@ -110,7 +110,31 @@ omarchy-remote expose desktop 6080 --auth login --allow you@example.com
 - **浏览器会先截走自己的快捷键。** ⌘W / Ctrl+W 关掉的是浏览器标签页（远程会话也随之断开），而不是远程窗口；⌘T、⌘N、⌘Q 及对应的 Ctrl 组合也到不了桌面；⌘1–9 / Ctrl+1–9 可能切换的是浏览器标签，而不是工作区。
 - **操作系统也会截走一些：** macOS 上的 ⌘Tab、⌘Space；Windows 上的 Win 键、Win+L、Win+D。
 
-遇到被截走的快捷键：打开 noVNC 侧边栏（左边缘的小把手）→ *Show extra keys* → 点亮 **Windows** 键（即 Super），再按另一个键。
+**屏幕上的 Windows 键就是 Super。** 打开 noVNC 侧边栏（左边缘的小把手）→ *Show extra keys*（键盘形状的按钮）。里面的 **Windows** 键发送的就是 Super：点一下按住，再按另一个键（比如 Return 打开终端），然后再点一下松开。它不挑键盘也不挑浏览器，遇到快捷键被截走、或者找不到 Super 键时都可以用。同一个面板里还有 Ctrl、Alt、Tab、Esc 和 Ctrl+Alt+Del。
+
+### 给别人一个独立的桌面
+
+不想和别人共用你的桌面，就给对方一个**独立**的账号和 Omarchy 桌面：
+
+```bash
+omarchy-remote user add alice --allow alice@example.com --via pangolin
+# -> https://alice.<你的域名>（alice 用邮箱验证码登录，进入的是她自己的桌面）
+omarchy-remote user list
+omarchy-remote user remove alice        # 保留账号和文件；彻底删除：sudo userdel -r alice
+```
+
+`user add` 会新建一个 Linux 账号（没有密码，也没有 sudo 权限），并为它初始化 Omarchy。然后在这个账号下启动一个桌面，监听 `127.0.0.1:6080+n`，没人登录也一直运行。不加 `--allow` 时不开放访问，只提示你之后要运行的 `expose` 命令。升级 omarchy-remote 后，对这个用户再运行一次 `user add` 即可更新。需要 Omarchy 4 或更高版本，执行过程中会要求输入你的 sudo 密码。
+
+和你隔离的方式：
+
+- **屏幕：** 对方的桌面跑在一块 1920×1080 的虚拟屏幕上（可在配置里用 `GUEST_MODE` 修改），你的显示器和会话不受影响。
+- **文件：** 各自独立的 home 目录。
+- **网络：** 一张防火墙表（`/etc/omarchy-remote/firewall.nft`，由 `omarchy-remote-firewall.service` 加载）只允许对方的程序访问**自己的**本机服务。你的桌面、模型 API、其他用户的桌面和其他本机服务都会被拒绝，你的 tailnet 也一样。这台机器是以你的身份加入 tailnet 的，不拦的话，对方就能访问你的其他设备。上网和 DNS 不受影响。
+- **仍然共用的：** CPU、内存和 GPU；进程列表（能看到程序名，看不到内容）；局域网。你（用 sudo）能看到对方的一切。
+
+**没有密码。** 访问地址那一步的登录是唯一的登录。这个账号没有密码，所以不能在机器前或通过 SSH 登录。它的 Omarchy 空闲锁屏也被关掉了（"stay awake"）；如果对方手动锁屏，就解不开了，只能由你重启他的桌面。
+
+这个账号会加入 `video` 组，这样它的桌面不占用座席也能使用 GPU。它的桌面会等机器自己的图形会话（或登录界面）起来之后才启动，否则重启后可能会抢走物理屏幕。
 
 ## 状态栏小组件（Omarchy 插件）
 
@@ -129,6 +153,9 @@ omarchy-remote expose <名字> <端口> --auth login|token|password|none [--allo
 omarchy-remote unexpose <名字>
 omarchy-remote config set public pangolin|cloudflare
 omarchy-remote list                   查看已暴露的服务
+omarchy-remote user add <名字> [--allow 邮箱] [--via pangolin|cloudflare]
+                                      给别人一个独立的桌面（见上文）
+omarchy-remote user remove <名字> | user list
 omarchy-remote status                 查看桌面服务和连接状态
 omarchy-remote pangolin connect|login|status|logs|disconnect
 omarchy-remote cloudflare login|status
@@ -160,8 +187,8 @@ omarchy-remote uninstall
 - 被暴露的服务只需要监听 `127.0.0.1`，Pangolin 通过站点隧道访问它们。
 - 令牌和密码等同钥匙：谁拿到谁就能进。要作废，先 `unexpose` 再重新 expose。
 - 通过桌面登录的人拥有你桌面的**完全控制权**。
-- wayvnc 没有密码，只监听本机；这台机器上的其他本地用户也能连上它。
-- 所有远程用户看到的是**同一个**桌面（暂不支持多用户独立会话）。
+- wayvnc 没有密码，只监听本机。用 `user add` 建的账号会被防火墙挡在外面；这台机器上的其他本地账号仍然能连上它。
+- 打开同一个桌面地址的人，看到的是同一个桌面。要给每个人一个独立桌面，用 `omarchy-remote user add`。
 
 ## 计划
 

@@ -155,8 +155,51 @@ three catches:
   ⌘1–9 / Ctrl+1–9 may switch browser tabs instead of workspaces.
 - **Your OS keeps some too:** ⌘Tab and ⌘Space on macOS; the Windows key, Win+L and Win+D on Windows.
 
-For a shortcut that gets intercepted, open the noVNC side panel (the small handle on the left
-edge) → *Show extra keys* → toggle the **Windows** key (= Super), then press the other key.
+**The on-screen Windows key is Super.** Open the noVNC side panel (the small handle on the left
+edge) → *Show extra keys* (the keyboard-shaped button). The **Windows** key there sends Super:
+click it to hold it down, press the other key (e.g. Return for a terminal), then click it again
+to release. It works on any keyboard and in any browser, so use it whenever a shortcut gets
+intercepted or you can't find Super. The same panel has Ctrl, Alt, Tab and Esc, and
+Ctrl+Alt+Del.
+
+### Desktops for other people
+
+Give someone their **own** account and Omarchy desktop instead of sharing yours:
+
+```bash
+omarchy-remote user add alice --allow alice@example.com --via pangolin
+# -> https://alice.<your-domain>  (alice signs in with an email code and gets her own desktop)
+omarchy-remote user list
+omarchy-remote user remove alice        # keeps the account and files: sudo userdel -r alice
+```
+
+`user add` creates the Linux account (no password, no sudo) and sets up Omarchy for it. It also
+starts a desktop for that account that keeps running without anyone logged in, on
+`127.0.0.1:6080+n`. Without `--allow`, nothing is exposed and it prints the `expose` command to run
+later. Run it again after updating omarchy-remote to update that user's copy. It needs Omarchy 4+
+and asks for your sudo password.
+
+How it is separated from you:
+
+- **Screen:** their desktop runs on a virtual 1920×1080 screen (`GUEST_MODE` in the config); your
+  monitor and session stay yours.
+- **Files:** separate home directories.
+- **Network:** a firewall table (`/etc/omarchy-remote/firewall.nft`, loaded by
+  `omarchy-remote-firewall.service`) lets their programs reach only their **own** local services. Your
+  desktop, model API, other users' desktops and other local services are refused, and so is your
+  tailnet. The machine is on the tailnet as you, so without this they could reach your other
+  devices. The internet and DNS still work.
+- **Still shared:** CPU, memory and GPU; the list of running processes (names, not contents); the
+  local network. You (with sudo) can see everything of theirs.
+
+**No password.** Signing in at the URL is the only login. The account has no password, so it
+can't be used to log in at the machine or over SSH. Omarchy's idle lock is turned off for it
+("stay awake"); if they lock the screen by hand anyway, they can't unlock it, and you have to
+restart their desktop.
+
+The account joins the `video` group so its desktop can use the GPU without a seat. Its desktop
+waits until the machine's own graphical session (or login screen) is up before it starts.
+Otherwise, after a reboot it could take the physical screen.
 
 ## Bar widget (Omarchy plugin)
 
@@ -176,6 +219,9 @@ omarchy-remote expose <name> <port> --auth login|token|password|none [--allow em
 omarchy-remote unexpose <name>
 omarchy-remote config set public pangolin|cloudflare
 omarchy-remote list                   show exposed services
+omarchy-remote user add <name> [--allow emails] [--via pangolin|cloudflare]
+                                      give someone their own desktop (see above)
+omarchy-remote user remove <name> | user list
 omarchy-remote status                 desktop services and connections
 omarchy-remote pangolin connect|login|status|logs|disconnect
 omarchy-remote cloudflare login|status
@@ -207,8 +253,10 @@ Settings can be overridden in `~/.config/omarchy-remote/config` (ports, noVNC qu
 - Exposed services only need to listen on `127.0.0.1`; Pangolin reaches them through the site tunnel.
 - Treat tokens and passwords like keys: anyone who has one gets in. To revoke, `unexpose` and expose again.
 - Anyone who passes the desktop login gets **full control** of your desktop session.
-- wayvnc has no password and listens on localhost; any local user on the machine could connect to it.
-- All remote desktop users see the **same** desktop (multi-user sessions are not supported yet).
+- wayvnc has no password and listens on localhost. Accounts made with `user add` are firewalled
+  off from it; other local accounts on the machine could connect to it.
+- Everyone who opens the same desktop URL shares that desktop. Give each person their own with
+  `omarchy-remote user add`.
 
 ## Roadmap
 

@@ -7,6 +7,7 @@ Private path: `tailscale serve --https=<port>`, tracked by name in `~/.config/om
 Public path: Pangolin resource `<name>.<NS-delegated domain>` → site tunnel → 127.0.0.1:<port> (login/token/password/none),
 or Cloudflare: proxied CNAME `<name>.<zone>` → tunnel `omarchy-remote-<host>` (user unit `omarchy-remote-tunnel`) → 127.0.0.1:<port> (login/token = Cloudflare Access, bearer = WAF custom rule, none).
 Built-in service: browser remote desktop (noVNC :6080 → wayvnc :5900 → Hyprland).
+Multi-user: `user add <name>` = own Linux account + headless Hyprland on 5900+n/6080+n (units in that user's lingering systemd --user, run from their own copy of the CLI with `GUEST=1`), registry `/etc/omarchy-remote/users`, nftables table `inet omarchy_remote` loaded by `omarchy-remote-firewall.service`.
 Long-term goal: a lightweight personal cloud on top of Omarchy (no Kubernetes, containers, or heavyweight user system):
 "your own computer, managed by AI, reachable anywhere". Planned: zero-config access via a shared domain + self-hosted
 Pangolin relay, an entry page, browser file access, agent skills to manage it in plain language, LAN-device proxying,
@@ -59,6 +60,12 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 - Cloudflare `login`/`token` = Access app `omarchy-remote:<name>:<auth>` + reusable policy `omarchy-remote:<name>` (emails / service token, decision `non_identity`) + service token `omarchy-remote:<name>`. Inline policies in the app body can't carry `include`; create the policy first, delete the app before its policy. Never verified against a live Zero Trust org: the test account's org belongs to Eros (don't use it); mock tests only.
 - Cloudflare `password` is refused: a WAF block can't send `WWW-Authenticate`, so browsers would never get a prompt.
 - Rollback traps run after errexit has unwound the function, so locals are gone: bake values into the trap string (`'"$fqdn"'`), don't reference `$fqdn` inside it.
+- Hyprland 0.56 can't run headless-only: aquamarine aborts (`CBackend::create() failed`) without a DRM card node, and render nodes don't count. A second user's Hyprland needs `LIBSEAT_BACKEND=noop` + the `video` group; it opens card1 without becoming DRM master, so it must start after the seat0 session (whoever opens the card first while nobody holds master takes the screen).
+- Omarchy 4 configs are Lua: `hyprctl keyword` fails ("non-legacy parsers"); use `hyprctl eval 'hl.monitor({...})'`. New accounts get configs from /etc/skel; `omarchy-provision-user` (as the user, `OMARCHY_SETUP_CONTEXT=provision-owner`) does the rest.
+- Every local account shares the machine's tailnet identity: anything a guest runs reaches `tailscale serve` (proxied by root tailscaled) and the owner's other devices. Per-port skuid rules on lo aren't enough; the firewall blocks 100.64.0.0/10 + fd7a:115c:a1e0::/48 for guests.
+- Guest isolation on lo: tag new TCP from the guest uid in output (`ct mark set <uid>`), and in input accept only `socket cgroupv2 level 2 "user.slice/user-<uid>.slice"`. The cgroup path is resolved when the rules load, so load after `user@<uid>.service`. Unprivileged nft syntax/behavior checks: `unshare -rn nft -c -f file`.
+- Guest accounts have no password: Omarchy's idle lock (quickshell, 300 s) would lock them out for good. The `~/.local/state/omarchy/indicators/stay-awake` file disables it; there is no unlock IPC.
+- Tailscale SSH accepts any local user on the test machine (`ssh <user>@<tailscale-ip>`), handy for acting as a guest without sudo.
 - noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
 
 ## Roadmap
