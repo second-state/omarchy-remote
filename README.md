@@ -155,8 +155,12 @@ three catches:
   ⌘1–9 / Ctrl+1–9 may switch browser tabs instead of workspaces.
 - **Your OS keeps some too:** ⌘Tab and ⌘Space on macOS; the Windows key, Win+L and Win+D on Windows.
 
-For a shortcut that gets intercepted, open the noVNC side panel (the small handle on the left
-edge) → *Show extra keys* → toggle the **Windows** key (= Super), then press the other key.
+**The on-screen Windows key is Super.** Open the noVNC side panel (the small handle on the left
+edge) → *Show extra keys* (the keyboard-shaped button). The **Windows** key there sends Super:
+click it to hold it down, press the other key (e.g. Return for a terminal), then click it again
+to release. It works on any keyboard and in any browser, so use it whenever a shortcut gets
+intercepted or you can't find Super. The same panel has Ctrl, Alt, Tab and Esc, and
+Ctrl+Alt+Del.
 
 ### Desktops for other people
 
