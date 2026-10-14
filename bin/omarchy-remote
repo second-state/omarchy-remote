@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.7.1"
+VERSION="0.7.2"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -141,7 +141,9 @@ PartOf=graphical-session.target
 [Service]
 ExecStartPre=$self ensure-display
 ExecStart=/usr/bin/wayvnc 127.0.0.1 $VNC_PORT
-Restart=on-failure
+# wayvnc exits 0 when its monitor goes away (unplugged, renamed after a replug), so
+# on-failure would leave the desktop down; ensure-display adds a headless one if needed.
+Restart=always
 RestartSec=3
 
 [Install]

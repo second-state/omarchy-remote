@@ -67,6 +67,7 @@ per-user desktops, and distribution through the Omarchy plugin marketplace.
 - Guest accounts have no password: Omarchy's idle lock (quickshell, 300 s) would lock them out for good. The `~/.local/state/omarchy/indicators/stay-awake` file disables it; there is no unlock IPC.
 - Tailscale SSH accepts any local user on the test machine (`ssh <user>@<tailscale-ip>`), handy for acting as a guest without sudo.
 - Ollama (and Vite, Rails dev…) refuse a Host that isn't localhost: 403 through every provider. `expose --host-header localhost` rewrites it (Cloudflare ingress `originRequest.httpHostHeader`, Pangolin `setHostHeader`); `tailscale serve` can't. Off by default: apps that build absolute URLs need the real Host. The demo video used a mock model, which is why this went unnoticed.
+- wayvnc exits with status 0 when its output disappears ("No fallback outputs left", e.g. HDMI-A-2 became HDMI-A-1 after a replug), so the owner's VNC unit needs `Restart=always`; with on-failure the desktop silently stayed down for two days.
 - noVNC settings live in `$NOVNC_DIR/defaults.json`; `index.html` symlinks to `vnc.html` so `/` opens the desktop.
 
 ## Roadmap
