@@ -208,7 +208,10 @@ omarchy plugin add https://github.com/second-state/omarchy-remote-plugin --enabl
 ```
 
 Shows what this machine exposes, with copy/open buttons for each URL
-([details](https://github.com/second-state/omarchy-remote-plugin)).
+([details](https://github.com/second-state/omarchy-remote-plugin)). It's listed on the official
+Omarchy plugin marketplace as
+[Omarchy Remote](https://plugins.omarchy.org/plugin.html?id=io.github.second-state.omarchy-remote).
+Install omarchy-remote first (see Install above): the widget only shows what the CLI reports.
 
 ## Commands
 
