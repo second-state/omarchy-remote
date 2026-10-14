@@ -142,7 +142,7 @@ omarchy-remote user remove alice        # 保留账号和文件；彻底删除�
 omarchy plugin add https://github.com/second-state/omarchy-remote-plugin --enable
 ```
 
-显示这台机器暴露了哪些服务，每个地址都可以一键复制或打开（[详情](https://github.com/second-state/omarchy-remote-plugin)）。
+显示这台机器暴露了哪些服务，每个地址都可以一键复制或打开（[详情](https://github.com/second-state/omarchy-remote-plugin)）。它已经上架 Omarchy 官方插件市场，名字是 [Omarchy Remote](https://plugins.omarchy.org/plugin.html?id=io.github.second-state.omarchy-remote)。请先安装 omarchy-remote 本身（见上文"安装"）：小组件只显示命令行工具报告的内容。
 
 ## 常用命令
 
