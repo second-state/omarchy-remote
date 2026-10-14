@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="0.7.0"
+VERSION="0.7.1"
 
 # ---- settings (override in ~/.config/omarchy-remote/config) -----------------
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-remote/config"
@@ -322,7 +322,7 @@ pg_resource_id() {   # pg_resource_id FQDN -> resourceId (empty if none)
 rand_secret() { python3 -c 'import secrets; print(secrets.token_urlsafe(18))'; }
 
 cmd_expose() {
-  local name="" port="" via="" auth="" allow="" user="omarchy" yes_public=0
+  local name="" port="" via="" auth="" allow="" user="omarchy" yes_public=0 host_header=""
   while (($#)); do
     case "$1" in
       --via)        via="${2:-}"; shift 2 ;;
@@ -333,6 +333,8 @@ cmd_expose() {
       --allow)      allow="${2:-}"; shift 2 ;;
       --allow=*)    allow="${1#*=}"; shift ;;
       --user)       user="${2:-}"; shift 2 ;;
+      --host-header)   host_header="${2:-}"; shift 2 ;;
+      --host-header=*) host_header="${1#*=}"; shift ;;
       --yes-public) yes_public=1; shift ;;
       -*)           die "Unknown option: $1" ;;
       *)  if [[ -z "$name" ]]; then name="$1"; elif [[ -z "$port" ]]; then port="$1"; else die "Unexpected argument: $1"; fi; shift ;;
@@ -341,6 +343,7 @@ cmd_expose() {
   [[ -n "$name" && -n "$port" ]] || die "usage: omarchy-remote expose <name> <port> [--via tailscale|pangolin|cloudflare] [--auth login|token|password|bearer|none]"
   valid_name "$name" || die "Name must be lowercase letters, digits and dashes (it becomes the subdomain)."
   if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then die "Invalid port: $port"; fi
+  [[ -z "$host_header" || "$host_header" =~ ^[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "--host-header takes a host name, e.g. localhost or localhost:$port"
 
   # No --via: private by default; asking for an auth mode means a public URL.
   # bearer exists only on Cloudflare and password only on Pangolin, so they pick their provider.
@@ -359,6 +362,7 @@ cmd_expose() {
   case "$via" in
     tailscale)
       [[ -z "$auth" ]] || die "Tailscale URLs are private to your tailnet and take no --auth. For a public URL with a login use --via pangolin (or cloudflare)."
+      [[ -z "$host_header" ]] || die "Tailscale can't rewrite the Host header. Use --via cloudflare or --via pangolin with --auth (a service that checks Host, like Ollama, answers 403 through Tailscale)."
       ;;
     pangolin|cloudflare)
       case "$auth" in
@@ -385,8 +389,8 @@ cmd_expose() {
 
   case "$via" in
     tailscale)  ts_expose "$name" "$port" ;;
-    pangolin)   pg_expose "$name" "$port" "$auth" "$allow" "$user" ;;
-    cloudflare) cf_expose "$name" "$port" "$auth" "$allow" ;;
+    pangolin)   pg_expose "$name" "$port" "$auth" "$allow" "$user" "$host_header" ;;
+    cloudflare) cf_expose "$name" "$port" "$auth" "$allow" "$host_header" ;;
   esac
 }
 
@@ -431,7 +435,7 @@ ts_unexpose() {
 
 # ---- Pangolin (public) ------------------------------------------------------
 pg_expose() {
-  local name="$1" port="$2" auth="$3" allow="$4" user="$5"
+  local name="$1" port="$2" auth="$3" allow="$4" user="$5" host_header="${6:-}"
   pg_load
   local fqdn="$name.$PG_BASE_DOMAIN" r id
   [[ -z "$(pg_resource_id "$fqdn")" ]] || die "$fqdn is already exposed. Run: omarchy-remote unexpose $name"
@@ -445,6 +449,7 @@ pg_expose() {
 
   pg_api PUT "/public-resource/$id/target" \
     "{\"siteId\":$PG_SITE_ID,\"ip\":\"127.0.0.1\",\"port\":$port,\"method\":\"http\",\"enabled\":true}" >/dev/null
+  [[ -z "$host_header" ]] || pg_api POST "/public-resource/$id" "{\"setHostHeader\":\"$host_header\"}" >/dev/null
 
   local pass emails tok
   case "$auth" in
@@ -593,17 +598,20 @@ EOF
   systemctl --user enable --now "$CF_UNIT" >/dev/null 2>&1 || systemctl --user start "$CF_UNIT"
 }
 
-# cf_ingress add FQDN PORT | del FQDN — edit the tunnel's remotely-managed ingress list.
+# cf_ingress add FQDN PORT [HOST_HEADER] | del FQDN — edit the tunnel's remotely-managed ingress list.
 cf_ingress() {
   local r new
   r="$(cf_api GET "/accounts/$CF_ACCOUNT/cfd_tunnel/$CF_TUNNEL_ID/configurations")"
-  new="$(python3 - "$r" "$1" "$2" "${3:-}" <<'PY'
+  new="$(python3 - "$r" "$1" "$2" "${3:-}" "${4:-}" <<'PY'
 import json, sys
-d = json.loads(sys.argv[1]); op, host, port = sys.argv[2], sys.argv[3], sys.argv[4]
+d = json.loads(sys.argv[1]); op, host, port, host_header = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
 rules = [x for x in (((d.get("result") or {}).get("config") or {}).get("ingress") or [])
          if x.get("hostname") and x.get("hostname") != host]
 if op == "add":
-    rules.append({"hostname": host, "service": "http://127.0.0.1:%s" % port})
+    rule = {"hostname": host, "service": "http://127.0.0.1:%s" % port}
+    if host_header:
+        rule["originRequest"] = {"httpHostHeader": host_header}
+    rules.append(rule)
 rules.append({"service": "http_status:404"})
 print(json.dumps({"config": {"ingress": rules}}))
 PY
@@ -732,7 +740,7 @@ cf_probe() {
 }
 
 cf_expose() {
-  local name="$1" port="$2" auth="$3" allow="${4:-}" fqdn c key="" code i
+  local name="$1" port="$2" auth="$3" allow="${4:-}" host_header="${5:-}" fqdn c key="" code i
   cf_load
   fqdn="$name.$CF_ZONE"
   c="$(cf_dns_comment "$fqdn")"
@@ -747,7 +755,7 @@ cf_expose() {
   elif [[ "$auth" == login || "$auth" == token ]]; then
     cf_access_add "$name" "$fqdn" "$auth" "$allow"   # before DNS: never reachable without it
   fi
-  cf_ingress add "$fqdn" "$port"
+  cf_ingress add "$fqdn" "$port" "$host_header"
   cf_api POST "/zones/$CF_ZONE_ID/dns_records" \
     "{\"type\":\"CNAME\",\"name\":\"$fqdn\",\"content\":\"$CF_TUNNEL_ID.cfargotunnel.com\",\"proxied\":true,\"comment\":\"$PG_TAG:$name:$auth\"}" >/dev/null
 
@@ -1339,6 +1347,9 @@ Usage: omarchy-remote <command>
                              Cloudflare Access; bearer = API key checked at Cloudflare's edge)
   expose <name> <port> --auth login|token|password|none [--allow a@x.com,b@y.com] [--via pangolin]
                              public URL https://<name>.<your-domain> via Pangolin
+  expose ... --host-header localhost
+                             public URLs: send this Host to the service (Ollama, Vite and others
+                             refuse requests for other host names)
   unexpose <name>
   list [--json]              show exposed services (--json: for scripts and the Omarchy plugin)
   config set public pangolin|cloudflare

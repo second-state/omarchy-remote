@@ -15,8 +15,8 @@ omarchy-remote expose app 3000
 # -> https://<machine>.<tailnet>.ts.net:3000 (default: Tailscale, only your own devices)
 omarchy-remote expose app 3000 --auth login --allow friend@example.com
 # -> https://app.example.com      (public; browser login, your friend gets an email code)
-omarchy-remote expose ai 11434 --auth bearer
-# -> https://ai.example.com       (public; OpenAI-style clients send "Authorization: Bearer <key>")
+omarchy-remote expose ai 11434 --auth bearer --host-header localhost
+# -> https://ai.example.com       (public; e.g. Ollama — OpenAI-style clients send "Authorization: Bearer <key>")
 ```
 
 Private URLs go through **Tailscale** (free for personal use, no domain needed). Public URLs
@@ -123,6 +123,12 @@ only Pangolin is set up on this machine; with both set up, `expose` says it pick
 | `none` | everyone | no login — requires `--yes-public` | share the URL | Cloudflare, Pangolin |
 
 Passwords, tokens and keys are generated for you and **printed once** — save them.
+
+**Services that check the host name.** Ollama, Vite and some other dev servers only answer
+requests addressed to `localhost`; through a URL they reply 403 even with the right
+credentials. Add `--host-header localhost` and the provider sends that host name instead
+(Cloudflare and Pangolin; Tailscale can't rewrite it, so a private URL won't work for these).
+Leave it off for ordinary web apps: they need the real host name to build links and redirects.
 
 A new Pangolin address needs about 30 seconds for its certificate (404 / connection errors until
 then). On Cloudflare, `expose` with `bearer`, `login` or `token` waits until requests without

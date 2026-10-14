@@ -13,8 +13,8 @@ omarchy-remote expose app 3000
 # -> https://<机器名>.<tailnet>.ts.net:3000（默认走 Tailscale，只有你自己的设备能访问）
 omarchy-remote expose app 3000 --auth login --allow friend@example.com
 # -> https://app.example.com     （公网；浏览器登录，朋友用邮箱验证码进入）
-omarchy-remote expose ai 11434 --auth bearer
-# -> https://ai.example.com      （公网；OpenAI 风格的客户端用 "Authorization: Bearer <key>" 调用）
+omarchy-remote expose ai 11434 --auth bearer --host-header localhost
+# -> https://ai.example.com      （公网；比如 Ollama，OpenAI 风格的客户端用 "Authorization: Bearer <key>" 调用）
 ```
 
 私有地址走 **Tailscale**（个人使用免费，不需要域名）。公网地址走你选的提供方：**Cloudflare**（通过 Cloudflare Access 做浏览器登录和服务令牌，还能在 Cloudflare 边缘校验 API key，兼容 OpenAI 风格的客户端和 SDK，包括流式输出），或者 **Pangolin**（浏览器登录、访问令牌、密码）。两个都配或只配一个都行。
@@ -89,6 +89,8 @@ omarchy-remote unexpose <名字>
 | `none` | 所有人 | 不需要登录，必须加 `--yes-public` 确认 | 直接发地址 | Cloudflare、Pangolin |
 
 密码、令牌和 key 都由工具自动生成，**只显示一次**，请自己保存好。
+
+**会检查域名的服务。** Ollama、Vite 等一些开发服务只接受发给 `localhost` 的请求；通过外部地址访问时，即使凭据正确也会返回 403。加上 `--host-header localhost`，提供方就会改用这个域名转发（Cloudflare 和 Pangolin 支持；Tailscale 改不了，所以这类服务用不了私有地址）。普通网页应用不要加：它们需要真实的域名来生成链接和跳转。
 
 Pangolin 的新地址需要大约 30 秒签发证书，在此之前出现 404 或连不上是正常的。在 Cloudflare 上，`bearer`、`login`、`token` 三种方式的 `expose` 都会等到不带凭据的请求确实被拒绝后才报告成功（通常 10～30 秒）。`unexpose` 之后，地址可能还会响应几秒。
 
